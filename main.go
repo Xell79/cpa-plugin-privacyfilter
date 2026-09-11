@@ -4,7 +4,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-var pluginVersion = "0.2.0"
+var pluginVersion = "0.3.0-dev"
 
 func buildPlugin(configYAML []byte, pluginDir string) (pluginapi.Plugin, error) {
 	cfg, errParse := parseConfig(configYAML)
@@ -27,11 +27,12 @@ func buildPlugin(configYAML []byte, pluginDir string) (pluginapi.Plugin, error) 
 	p.filter = f
 
 	return pluginapi.Plugin{
+		SchemaVersion: implementedSchemaVersion,
 		Metadata: pluginapi.Metadata{
 			Name:             pluginName,
 			Version:          pluginVersion,
-			Author:           "rheodev",
-			GitHubRepository: "https://github.com/rheodev/cpa-plugin-privacyfilter",
+			Author:           "ahoo (fork of rheodev)",
+			GitHubRepository: "https://github.com/ahoo/cpa-plugin-privacyfilter",
 			ConfigFields: []pluginapi.ConfigField{
 				{
 					Name:        "gitleaks_toml",
@@ -51,7 +52,8 @@ func buildPlugin(configYAML []byte, pluginDir string) (pluginapi.Plugin, error) 
 			},
 		},
 		Capabilities: pluginapi.Capabilities{
-			RequestInterceptor: p,
+			RequestInterceptor:     p,
+			RequestLifecyclePlugin: p,
 		},
 	}, nil
 }

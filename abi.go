@@ -48,6 +48,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"unsafe"
@@ -64,7 +65,18 @@ var privacyFilterABIState = struct {
 	inFlight     sync.WaitGroup
 }{}
 
-const maxCGoBytesLen = C.size_t(1<<31 - 1)
+const (
+	// implementedSchemaVersion is the newest RPC contract this plugin uses.
+	// Schema 2 adds active request termination and request.complete lifecycle
+	// notifications while keeping later response-stream omission semantics out
+	// of this request-only implementation.
+	implementedSchemaVersion uint32 = 2
+	legacySchemaVersion      uint32 = 1
+
+	// maxABIRequestBytes is checked before C.GoBytes duplicates the host payload.
+	// Request bodies have their own tighter configurable limit at the walker.
+	maxABIRequestBytes = C.size_t(64 << 20)
+)
 
 type abiEnvelope struct {
 	OK     bool            `json:"ok"`
@@ -78,8 +90,11 @@ type abiError struct {
 }
 
 type abiLifecycleRequest struct {
-	ConfigYAML []byte `json:"config_yaml"`
-	PluginDir  string `json:"plugin_dir,omitempty"`
+	ConfigYAML    []byte `json:"config_yaml"`
+	SchemaVersion uint32 `json:"schema_version"`
+	// PluginDir was never part of the v7.2.157 host payload. Keep accepting it
+	// for test harnesses and legacy hosts; production falls back to dladdr.
+	PluginDir string `json:"plugin_dir,omitempty"`
 }
 
 type abiRequestInterceptRequest struct {
@@ -94,7 +109,8 @@ type abiRegistration struct {
 }
 
 type abiCapabilities struct {
-	RequestInterceptor bool `json:"request_interceptor"`
+	RequestInterceptor     bool `json:"request_interceptor"`
+	RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
 }
 
 func main() {}
@@ -125,26 +141,48 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 }
 
 //export PrivacyFilterPluginCall
-func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) (result C.int) {
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
 	}
+	methodName := ""
+	if method != nil {
+		methodName = C.GoString(method)
+	}
+	defer func() {
+		if recover() == nil {
+			return
+		}
+		writeABIResponse(response, abiPanicEnvelope(methodName))
+		result = 0
+	}()
+
 	if method == nil {
 		writeABIResponse(response, abiErrorEnvelope("invalid_method", "method is required"))
 		return 0
 	}
 	var requestBytes []byte
 	if request != nil && requestLen > 0 {
-		if requestLen > maxCGoBytesLen {
-			writeABIResponse(response, abiErrorEnvelope("request_too_large", "request payload is too large"))
+		if requestLen > maxABIRequestBytes {
+			writeABIResponse(response, abiFailureEnvelope(
+				methodName,
+				http.StatusRequestEntityTooLarge,
+				"request_too_large",
+				"privacy filter request payload exceeds the native plugin limit",
+			))
 			return 0
 		}
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
-	raw, errHandle := handlePrivacyFilterABIMethod(context.Background(), C.GoString(method), requestBytes)
+	raw, errHandle := handlePrivacyFilterABIMethod(context.Background(), methodName, requestBytes)
 	if errHandle != nil {
-		writeABIResponse(response, abiErrorEnvelope("plugin_error", errHandle.Error()))
+		writeABIResponse(response, abiFailureEnvelope(
+			methodName,
+			http.StatusServiceUnavailable,
+			"plugin_error",
+			"privacy filter could not safely inspect the request",
+		))
 		return 0
 	}
 	writeABIResponse(response, raw)
@@ -172,6 +210,8 @@ func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return handlePrivacyFilterRegister(request)
+	case pluginabi.MethodPluginQuiesce:
+		return handlePrivacyFilterQuiesce()
 	}
 
 	p, done, errPlugin := beginPrivacyFilterPluginCall()
@@ -195,6 +235,15 @@ func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []
 		}
 		resp, errCall := p.InterceptRequestAfterAuth(ctx, req.RequestInterceptRequest)
 		return abiOKEnvelopeWithError(resp, errCall)
+	case pluginabi.MethodRequestComplete:
+		var req pluginapi.RequestCompletion
+		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
+			return nil, errDecode
+		}
+		if errCall := p.HandleRequestComplete(ctx, req); errCall != nil {
+			return nil, errCall
+		}
+		return abiOKEnvelope(struct{}{})
 	default:
 		return abiErrorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -213,17 +262,41 @@ func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 	if !ok || p == nil {
 		return nil, fmt.Errorf("privacyfilter plugin registration returned invalid interceptor")
 	}
+	negotiatedSchema := negotiateSchemaVersion(req.SchemaVersion)
+	plugin.SchemaVersion = negotiatedSchema
+	if negotiatedSchema < implementedSchemaVersion {
+		plugin.Capabilities.RequestLifecyclePlugin = nil
+	}
 	privacyFilterABIState.Lock()
 	privacyFilterABIState.plugin = p
 	privacyFilterABIState.shuttingDown = false
 	privacyFilterABIState.Unlock()
 	return abiOKEnvelope(abiRegistration{
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: negotiatedSchema,
 		Metadata:      plugin.Metadata,
 		Capabilities: abiCapabilities{
-			RequestInterceptor: plugin.Capabilities.RequestInterceptor != nil,
+			RequestInterceptor:     plugin.Capabilities.RequestInterceptor != nil,
+			RequestLifecyclePlugin: plugin.Capabilities.RequestLifecyclePlugin != nil,
 		},
 	})
+}
+
+func negotiateSchemaVersion(hostSchema uint32) uint32 {
+	if hostSchema == 0 {
+		hostSchema = legacySchemaVersion
+	}
+	if hostSchema < implementedSchemaVersion {
+		return hostSchema
+	}
+	return implementedSchemaVersion
+}
+
+func handlePrivacyFilterQuiesce() ([]byte, error) {
+	privacyFilterABIState.Lock()
+	privacyFilterABIState.shuttingDown = true
+	privacyFilterABIState.Unlock()
+	privacyFilterABIState.inFlight.Wait()
+	return abiOKEnvelope(struct{}{})
 }
 
 func beginPrivacyFilterPluginCall() (*privacyFilterPlugin, func(), error) {
@@ -257,6 +330,36 @@ func abiOKEnvelope(v any) ([]byte, error) {
 func abiErrorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(abiEnvelope{OK: false, Error: &abiError{Code: code, Message: message}})
 	return raw
+}
+
+func abiPanicEnvelope(method string) []byte {
+	return abiFailureEnvelope(
+		method,
+		http.StatusServiceUnavailable,
+		"plugin_panic",
+		"privacy filter recovered an internal panic and failed closed",
+	)
+}
+
+func abiFailureEnvelope(method string, status int, code, message string) []byte {
+	if method == pluginabi.MethodRequestInterceptBefore || method == pluginabi.MethodRequestInterceptAfter {
+		body, _ := json.Marshal(map[string]any{
+			"error": map[string]string{
+				"type":    code,
+				"message": message,
+			},
+		})
+		raw, err := abiOKEnvelope(pluginapi.RequestInterceptResponse{
+			Terminate:       true,
+			StatusCode:      status,
+			ResponseHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			ResponseBody:    body,
+		})
+		if err == nil {
+			return raw
+		}
+	}
+	return abiErrorEnvelope(code, message)
 }
 
 func writeABIResponse(response *C.cliproxy_buffer, raw []byte) {
