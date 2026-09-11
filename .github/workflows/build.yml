@@ -27,8 +27,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Test
-        run: go test ./...
+      - name: Test with race detector
+        run: go test -race ./...
 
       - name: Vet
         run: go vet ./...
@@ -86,6 +86,16 @@ jobs:
               -ldflags "-s -w -X main.pluginVersion=${VERSION}" \
               -o "dist/${LIB_NAME}" .
           rm -f "dist/${PLUGIN_ID}.h"
+
+      - name: Verify Linux native ABI exports
+        if: matrix.goos == 'linux'
+        run: |
+          set -euo pipefail
+          nm -D "dist/${LIB_NAME}" > dist/native-symbols.txt
+          for symbol in cliproxy_plugin_init PrivacyFilterPluginCall PrivacyFilterPluginFree PrivacyFilterPluginShutdown; do
+            grep -Eq "[[:space:]]T[[:space:]]${symbol}$" dist/native-symbols.txt
+          done
+          rm -f dist/native-symbols.txt
 
       - name: Package plugin
         run: scripts/package-plugin.sh dist "${LIB_NAME}" "${ARCHIVE_NAME}"
