@@ -85,6 +85,34 @@ func TestIssue3OverlapRegression(t *testing.T) {
 	}
 }
 
+func TestPreferredRuleMetadataSurvivesOverlappingPII(t *testing.T) {
+	engine := customEngine(t, `
+[[rules]]
+id = "block-email"
+regex = '''[a-z]+@example\.com'''
+keywords = ["@example."]
+`)
+	const input = "test@example.com"
+
+	baseline, err := engine.Detect(context.Background(), input, RequestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseline) != 1 || baseline[0].RuleID != rulePIIEmail {
+		t.Fatalf("baseline overlap metadata = %+v", baseline)
+	}
+
+	preferred, err := engine.Detect(context.Background(), input, RequestOptions{
+		PreferredRuleIDs: map[string]struct{}{"block-email": {}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preferred) != 1 || preferred[0].RuleID != "block-email" {
+		t.Fatalf("preferred overlap metadata = %+v", preferred)
+	}
+}
+
 func TestStrongContextLookbackBoundaries(t *testing.T) {
 	candidate := "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 	atBoundary := strings.Repeat("x", contextLookback-len("token = ")) + "token = " + candidate

@@ -181,7 +181,7 @@ func (e *Engine) detect(ctx context.Context, text string, options RequestOptions
 		return nil, err
 	}
 
-	collector := newSpanCollector(len(text), budget.remainingFindings())
+	collector := newSpanCollector(len(text), budget.remainingFindings(), options.PreferredRuleIDs)
 	if err := detectPII(ctx, text, collector); err != nil {
 		return nil, err
 	}
@@ -258,16 +258,17 @@ type span struct {
 // finding from leaving a sensitive suffix visible while keeping the output
 // sorted and disjoint.
 type spanCollector struct {
-	textLen int
-	max     int
-	spans   []span
+	textLen   int
+	max       int
+	preferred map[string]struct{}
+	spans     []span
 }
 
-func newSpanCollector(textLen, maxFindings int) *spanCollector {
+func newSpanCollector(textLen, maxFindings int, preferred map[string]struct{}) *spanCollector {
 	if maxFindings < 0 {
 		maxFindings = 0
 	}
-	return &spanCollector{textLen: textLen, max: maxFindings}
+	return &spanCollector{textLen: textLen, max: maxFindings, preferred: preferred}
 }
 
 func (c *spanCollector) add(candidate span) error {
@@ -277,11 +278,14 @@ func (c *spanCollector) add(candidate span) error {
 	i := sort.Search(len(c.spans), func(i int) bool { return c.spans[i].end > candidate.start })
 	j := i
 	merged := candidate
+	metadataPreferred := c.isPreferred(merged.ruleID)
 	for j < len(c.spans) && c.spans[j].start < merged.end {
 		existing := c.spans[j]
-		if j == i {
+		existingPreferred := c.isPreferred(existing.ruleID)
+		if (j == i && !metadataPreferred) || (!metadataPreferred && existingPreferred) {
 			merged.kind = existing.kind
 			merged.ruleID = existing.ruleID
+			metadataPreferred = existingPreferred
 		}
 		if existing.start < merged.start {
 			merged.start = existing.start
@@ -305,6 +309,11 @@ func (c *spanCollector) add(candidate span) error {
 	copy(c.spans[i+1:], c.spans[j:])
 	c.spans = c.spans[:newCount]
 	return nil
+}
+
+func (c *spanCollector) isPreferred(ruleID string) bool {
+	_, ok := c.preferred[ruleID]
+	return ok
 }
 
 func (c *spanCollector) findings() []Finding {

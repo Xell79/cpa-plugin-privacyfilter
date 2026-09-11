@@ -61,6 +61,7 @@ var privacyFilterABIState = struct {
 	sync.RWMutex
 	host         *C.cliproxy_host_api
 	plugin       *privacyFilterPlugin
+	runtime      *runtimeState
 	shuttingDown bool
 	inFlight     sync.WaitGroup
 }{}
@@ -202,8 +203,17 @@ func PrivacyFilterPluginShutdown() {
 	privacyFilterABIState.shuttingDown = true
 	privacyFilterABIState.plugin = nil
 	privacyFilterABIState.host = nil
+	runtime := privacyFilterABIState.runtime
 	privacyFilterABIState.Unlock()
 	privacyFilterABIState.inFlight.Wait()
+	if runtime != nil && runtime.cache != nil {
+		runtime.cache.Clear()
+	}
+	privacyFilterABIState.Lock()
+	if privacyFilterABIState.runtime == runtime {
+		privacyFilterABIState.runtime = nil
+	}
+	privacyFilterABIState.Unlock()
 }
 
 func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []byte) ([]byte, error) {
@@ -212,6 +222,8 @@ func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []
 		return handlePrivacyFilterRegister(request)
 	case pluginabi.MethodPluginQuiesce:
 		return handlePrivacyFilterQuiesce()
+	case pluginabi.MethodRequestComplete:
+		return handlePrivacyFilterRequestComplete(ctx, request)
 	}
 
 	p, done, errPlugin := beginPrivacyFilterPluginCall()
@@ -235,18 +247,26 @@ func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []
 		}
 		resp, errCall := p.InterceptRequestAfterAuth(ctx, req.RequestInterceptRequest)
 		return abiOKEnvelopeWithError(resp, errCall)
-	case pluginabi.MethodRequestComplete:
-		var req pluginapi.RequestCompletion
-		if errDecode := json.Unmarshal(request, &req); errDecode != nil {
-			return nil, errDecode
-		}
-		if errCall := p.HandleRequestComplete(ctx, req); errCall != nil {
-			return nil, errCall
-		}
-		return abiOKEnvelope(struct{}{})
 	default:
 		return abiErrorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
+}
+
+// request.complete remains accepted while quiesced. It only touches the
+// concurrency-safe runtime cache, so it cannot start new interceptor work or
+// race plugin teardown, and late lifecycle notifications still release state.
+func handlePrivacyFilterRequestComplete(_ context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.RequestCompletion
+	if errDecode := json.Unmarshal(request, &req); errDecode != nil {
+		return nil, errDecode
+	}
+	privacyFilterABIState.RLock()
+	runtime := privacyFilterABIState.runtime
+	privacyFilterABIState.RUnlock()
+	if runtime != nil {
+		releaseRequestScanState(runtime.cache, req)
+	}
+	return abiOKEnvelope(struct{}{})
 }
 
 func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
@@ -254,7 +274,14 @@ func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 	if errDecode := json.Unmarshal(request, &req); errDecode != nil {
 		return nil, errDecode
 	}
-	plugin, errBuild := buildPlugin(req.ConfigYAML, req.PluginDir)
+	privacyFilterABIState.Lock()
+	if privacyFilterABIState.runtime == nil {
+		privacyFilterABIState.runtime = newRuntimeState()
+	}
+	runtime := privacyFilterABIState.runtime
+	privacyFilterABIState.Unlock()
+
+	plugin, errBuild := buildPluginWithRuntime(req.ConfigYAML, req.PluginDir, runtime)
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -263,6 +290,10 @@ func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 		return nil, fmt.Errorf("privacyfilter plugin registration returned invalid interceptor")
 	}
 	negotiatedSchema := negotiateSchemaVersion(req.SchemaVersion)
+	if negotiatedSchema < implementedSchemaVersion &&
+		(p.cfg.OnError == onErrorBlock || len(p.blockRuleIDs) > 0) {
+		return nil, fmt.Errorf("privacyfilter: fail-closed mode requires host schema %d or newer", implementedSchemaVersion)
+	}
 	plugin.SchemaVersion = negotiatedSchema
 	if negotiatedSchema < implementedSchemaVersion {
 		plugin.Capabilities.RequestLifecyclePlugin = nil

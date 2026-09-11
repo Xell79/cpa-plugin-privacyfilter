@@ -4,13 +4,33 @@ import (
 	"context"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 var _ pluginapi.RequestLifecyclePlugin = (*privacyFilterPlugin)(nil)
 
-// HandleRequestComplete releases request-scoped state. The initial
-// implementation is intentionally a no-op; request cache cleanup is added with
-// the changed-after lifecycle integration.
-func (p *privacyFilterPlugin) HandleRequestComplete(context.Context, pluginapi.RequestCompletion) error {
+// HandleRequestComplete releases the request fingerprint and request-local
+// renderer state after the final response or stream chunk. Complete is
+// idempotent; TTL/LRU remain a fallback for missing best-effort notifications.
+func (p *privacyFilterPlugin) HandleRequestComplete(_ context.Context, done pluginapi.RequestCompletion) error {
+	if p == nil {
+		return nil
+	}
+	releaseRequestScanState(p.cache, done)
 	return nil
+}
+
+func releaseRequestScanState(cache *RequestScanCache, done pluginapi.RequestCompletion) {
+	if cache == nil || done.RequestID == "" {
+		return
+	}
+	removed := cache.Complete(done.RequestID)
+	if removed && log.IsLevelEnabled(log.DebugLevel) {
+		stats := cache.Stats()
+		log.WithFields(log.Fields{
+			"outcome":       safeLogValue(string(done.Outcome)),
+			"stream":        done.Stream,
+			"cache_entries": stats.Entries,
+		}).Debug("privacyfilter: request scan state released")
+	}
 }

@@ -12,24 +12,40 @@ import (
 func resetABIStateForTest(t *testing.T) {
 	t.Helper()
 	privacyFilterABIState.Lock()
+	runtime := privacyFilterABIState.runtime
 	privacyFilterABIState.plugin = nil
+	privacyFilterABIState.runtime = nil
 	privacyFilterABIState.shuttingDown = false
 	privacyFilterABIState.host = nil
 	privacyFilterABIState.Unlock()
+	if runtime != nil && runtime.cache != nil {
+		runtime.cache.Clear()
+	}
 	t.Cleanup(func() {
 		privacyFilterABIState.inFlight.Wait()
 		privacyFilterABIState.Lock()
+		runtime := privacyFilterABIState.runtime
 		privacyFilterABIState.plugin = nil
+		privacyFilterABIState.runtime = nil
 		privacyFilterABIState.shuttingDown = false
 		privacyFilterABIState.host = nil
 		privacyFilterABIState.Unlock()
+		if runtime != nil && runtime.cache != nil {
+			runtime.cache.Clear()
+		}
 	})
 }
 
 func registerForTest(t *testing.T, hostSchema uint32) abiRegistration {
 	t.Helper()
+	return registerWithConfigForTest(t, hostSchema, nil)
+}
+
+func registerWithConfigForTest(t *testing.T, hostSchema uint32, config []byte) abiRegistration {
+	t.Helper()
 	req, err := json.Marshal(abiLifecycleRequest{
 		SchemaVersion: hostSchema,
+		ConfigYAML:    config,
 		PluginDir:     t.TempDir(),
 	})
 	if err != nil {
@@ -86,7 +102,12 @@ func TestRegistrationNegotiatesLifecycleCapability(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetABIStateForTest(t)
-			reg := registerForTest(t, tc.hostSchema)
+			var reg abiRegistration
+			if tc.hostSchema < implementedSchemaVersion {
+				reg = registerWithConfigForTest(t, tc.hostSchema, []byte("on_error: passthrough\n"))
+			} else {
+				reg = registerForTest(t, tc.hostSchema)
+			}
 			if reg.SchemaVersion != tc.wantSchema {
 				t.Fatalf("schema = %d, want %d", reg.SchemaVersion, tc.wantSchema)
 			}
@@ -97,6 +118,20 @@ func TestRegistrationNegotiatesLifecycleCapability(t *testing.T) {
 				t.Fatalf("lifecycle capability = %v, want %v", reg.Capabilities.RequestLifecyclePlugin, tc.wantLifecycle)
 			}
 		})
+	}
+}
+
+func TestLegacyHostRejectsDefaultFailClosedConfig(t *testing.T) {
+	resetABIStateForTest(t)
+	req, err := json.Marshal(abiLifecycleRequest{
+		SchemaVersion: 1,
+		PluginDir:     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handlePrivacyFilterRegister(req); err == nil {
+		t.Fatal("schema-1 host accepted default fail-closed configuration")
 	}
 }
 
@@ -120,6 +155,36 @@ func TestRequestCompleteDispatch(t *testing.T) {
 	}
 	if !env.OK {
 		t.Fatalf("request.complete envelope not OK: %s", raw)
+	}
+}
+
+func TestRequestCompleteRemainsAvailableWhileQuiesced(t *testing.T) {
+	resetABIStateForTest(t)
+	registerForTest(t, 2)
+
+	privacyFilterABIState.RLock()
+	runtime := privacyFilterABIState.runtime
+	privacyFilterABIState.RUnlock()
+	if runtime == nil || runtime.cache == nil {
+		t.Fatal("registered runtime cache is nil")
+	}
+	runtime.cache.Acquire("request-quiesce", testRequestScanContext())
+	if _, err := handlePrivacyFilterQuiesce(); err != nil {
+		t.Fatalf("quiesce: %v", err)
+	}
+
+	req, err := json.Marshal(pluginapi.RequestCompletion{
+		RequestID: "request-quiesce",
+		Outcome:   pluginapi.RequestCompletionSucceeded,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handlePrivacyFilterABIMethod(context.Background(), pluginabi.MethodRequestComplete, req); err != nil {
+		t.Fatalf("request.complete while quiesced: %v", err)
+	}
+	if runtime.cache.Len() != 0 {
+		t.Fatalf("cache retained %d entries after quiesced completion", runtime.cache.Len())
 	}
 }
 

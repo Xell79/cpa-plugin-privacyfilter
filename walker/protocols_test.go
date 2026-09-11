@@ -122,15 +122,18 @@ func TestProtocolFixtures(t *testing.T) {
 			{`$["messages"][2]["content"][1]["content"][0]["text"]`, "nested tool text", walker.ScopeToolOutput, walker.TargetKindToolOutput, walker.MutabilityDirect},
 			{`$["messages"][2]["content"][1]["content"][1]["answer"]`, "Carol", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
 			{`$["messages"][2]["content"][1]["content"][1]["items"][0]`, "Dave", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
+			{`$["messages"][2]["content"][1]["content"][1]["signature"]`, "result signature", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
+			{`$["messages"][2]["content"][1]["content"][1]["id"]`, "result id", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
+			{`$["messages"][2]["content"][1]["content"][1]["name"]`, "result name", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
+			{`$["messages"][2]["content"][1]["content"][1]["tool_use_id"]`, "result tool id", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
 			{`$["messages"][2]["content"][1]["content"][1]["source"]["label"]`, "Eve", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
 			{`$["messages"][3]["content"]`, "assistant final", walker.ScopeAssistant, walker.TargetKindNaturalText, walker.MutabilityDirect},
 			{`$["messages"][4]["content"]`, "last user", walker.ScopeUser, walker.TargetKindNaturalText, walker.MutabilityDirect},
 		})
 		assertValuesNotTargeted(t, result,
 			"claude-test", "toolu_1", "toolu_2", "lookup", "private chain", "thinking signature", "encrypted reasoning",
-			"result signature", "result id", "result name", "result tool id", "base64 output", "image base64",
-			"schema tool", "schema description", "schema nested")
-		if result.Opaque < 10 || result.UnsupportedCount != 0 {
+			"base64 output", "image base64", "schema tool", "schema description", "schema nested")
+		if result.Opaque < 6 || result.UnsupportedCount != 0 {
 			t.Fatalf("counters = opaque %d unsupported %d", result.Opaque, result.UnsupportedCount)
 		}
 	})

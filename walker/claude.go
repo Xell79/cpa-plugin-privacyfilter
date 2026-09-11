@@ -227,16 +227,17 @@ func walkClaudeToolResult(c *collector, value *node) error {
 	}
 }
 
+// These names carry Anthropic reasoning integrity data even when nested in an
+// otherwise arbitrary tool result. Generic data keys such as id, name,
+// signature, and tool_use_id are intentionally not listed: outside a typed
+// protocol block they are ordinary model-visible tool output and must be
+// inspected.
 var claudeProtectedOutputKeys = map[string]struct{}{
 	"thinking":          {},
 	"redacted_thinking": {},
-	"signature":         {},
 	"thoughtSignature":  {},
 	"thought_signature": {},
 	"encrypted_content": {},
-	"id":                {},
-	"name":              {},
-	"tool_use_id":       {},
 }
 
 func walkClaudeOutputValue(c *collector, value *node, underSource bool) error {

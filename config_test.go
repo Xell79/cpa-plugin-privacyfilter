@@ -88,6 +88,13 @@ func TestReplacementRendererOverridesTypedLabel(t *testing.T) {
 	}
 }
 
+func TestBuildPluginRejectsSensitiveReplacement(t *testing.T) {
+	_, err := buildPlugin([]byte("replacements:\n  email: test@example.com\n"), t.TempDir())
+	if err == nil {
+		t.Fatal("buildPlugin accepted a replacement that the engine redacts")
+	}
+}
+
 func TestConventionalSidecarUsesReportedCompatibility(t *testing.T) {
 	dir := t.TempDir()
 	rulesDir := filepath.Join(dir, "rules")

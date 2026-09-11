@@ -220,6 +220,25 @@ func TestRequestScanCacheTTLAndSlidingAccess(t *testing.T) {
 	}
 }
 
+func TestRequestScanCacheAcquirePrunesOtherExpiredEntries(t *testing.T) {
+	clock := &requestCacheFakeClock{now: time.Unix(1_000, 0)}
+	cache := newRequestScanCache(RequestScanCacheOptions{
+		TTL:        10 * time.Second,
+		MaxEntries: 4,
+	}, clock.Now)
+	context := testRequestScanContext()
+	cache.Acquire("request-1", context)
+	cache.Acquire("request-2", context)
+
+	clock.Advance(10 * time.Second)
+	cache.Acquire("request-3", context)
+
+	stats := cache.Stats()
+	if stats.Entries != 1 || stats.Expirations != 2 {
+		t.Fatalf("Stats() = %+v, want one live entry and two expirations", stats)
+	}
+}
+
 func TestRequestScanCacheNonPositiveTTLDisablesExpiration(t *testing.T) {
 	for _, ttl := range []time.Duration{0, -time.Second} {
 		t.Run(ttl.String(), func(t *testing.T) {
@@ -349,6 +368,24 @@ func TestRequestScanStateRendererFactoryIsConcurrentAndSticky(t *testing.T) {
 	state.StoreRendererState(nil)
 	if value, ok := state.LoadRendererState(); !ok || value != nil {
 		t.Fatalf("stored nil state = %v, %v, want nil, true", value, ok)
+	}
+}
+
+func TestRequestScanCacheClearReleasesAllState(t *testing.T) {
+	cache := NewRequestScanCache(RequestScanCacheOptions{MaxEntries: 4})
+	for _, id := range []string{"a", "b", "c"} {
+		state := cache.Acquire(id, RequestScanContext{Revision: 1})
+		state.Record([]byte(id), nil)
+		state.StoreRendererState(map[string]string{"secret": id})
+	}
+	if removed := cache.Clear(); removed != 3 {
+		t.Fatalf("Clear() removed %d, want 3", removed)
+	}
+	if cache.Len() != 0 {
+		t.Fatalf("Len() = %d after clear", cache.Len())
+	}
+	if removed := cache.Clear(); removed != 0 {
+		t.Fatalf("second Clear() removed %d", removed)
 	}
 }
 

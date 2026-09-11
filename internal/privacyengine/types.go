@@ -71,10 +71,12 @@ func (f RendererFunc) Render(ctx context.Context, finding Finding, plaintext str
 // RequestOptions carries request-scoped state. Reuse one Budget across all
 // text nodes in a request so byte, finding, and node limits are cumulative.
 // Renderer is consulted only by Redact and may itself hold request-scoped
-// pseudonym state.
+// pseudonym state. PreferredRuleIDs preserves action-bearing rule metadata when
+// its span overlaps another detector's finding.
 type RequestOptions struct {
-	Budget   *Budget
-	Renderer Renderer
+	Budget           *Budget
+	Renderer         Renderer
+	PreferredRuleIDs map[string]struct{}
 }
 
 var (

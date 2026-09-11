@@ -1,26 +1,25 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"strings"
 
 	"github.com/rheodev/cpa-plugin-privacyfilter/internal/privacyengine"
+	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
+	"github.com/rheodev/cpa-plugin-privacyfilter/walker"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
 
 type privacyFilterPlugin struct {
 	cfg          privacyFilterConfig
-	pluginDir    string
 	engine       *privacyengine.Engine
 	renderer     privacyengine.Renderer
 	blockRuleIDs map[string]struct{}
+	cache        *RequestScanCache
+	revision     uint64
 }
 
 var _ pluginapi.RequestInterceptor = (*privacyFilterPlugin)(nil)
@@ -59,26 +58,50 @@ func (p *privacyFilterPlugin) interceptRequest(ctx context.Context, req pluginap
 		return pluginapi.RequestInterceptResponse{}, nil
 	}
 
-	budget, errBudget := privacyengine.NewBudget(p.cfg.engineLimits())
-	if errBudget != nil {
-		return p.handleFailure(req.SourceFormat, errBudget), nil
+	modelContext := req.RequestedModel
+	if modelContext == "" {
+		modelContext = req.Model
 	}
-	modified, findingCount, errRedact := p.redactRequestBody(ctx, req.Body, budget)
-	if errRedact != nil {
-		return p.handleFailure(req.SourceFormat, errRedact), nil
+	state := p.cache.Acquire(req.RequestID, RequestScanContext{
+		Revision:     p.revision,
+		SourceFormat: req.SourceFormat,
+		Model:        modelContext,
+	})
+	if state.Seen(req.Body) {
+		return pluginapi.RequestInterceptResponse{}, nil
 	}
-	if findingCount > 0 {
+	rendererState := state.GetOrCreateRendererState(func() any {
+		return newRequestRenderer(p.renderer)
+	})
+	renderer, ok := rendererState.(*requestRenderer)
+	if !ok || renderer == nil {
+		return p.handleFailure(req.SourceFormat, privacyengine.ErrInternalFailure), nil
+	}
+
+	result, errSanitize := p.sanitizeRequestWithRenderer(ctx, req.SourceFormat, req.Body, renderer)
+	if errSanitize != nil {
+		return p.handleFailure(req.SourceFormat, errSanitize), nil
+	}
+	if result.changed {
+		state.Record(req.Body, result.body)
+	} else {
+		state.Record(req.Body, nil)
+	}
+	if result.findings > 0 || result.unsupported > 0 {
 		log.WithFields(log.Fields{
 			"source_format": safeLogValue(req.SourceFormat),
 			"model":         safeLogValue(req.RequestedModel),
-			"findings":      findingCount,
 			"mode":          string(p.cfg.Mode),
-		}).Info("privacyfilter: sensitive values detected")
+			"findings":      result.findings,
+			"targets":       result.targets,
+			"opaque":        result.opaque,
+			"unsupported":   result.unsupported,
+		}).Info("privacyfilter: request inspection complete")
 	}
-	if p.cfg.Mode == modeAudit || modified == nil {
+	if !result.changed {
 		return pluginapi.RequestInterceptResponse{}, nil
 	}
-	return pluginapi.RequestInterceptResponse{Body: modified}, nil
+	return pluginapi.RequestInterceptResponse{Body: result.body}, nil
 }
 
 func (p *privacyFilterPlugin) handleFailure(sourceFormat string, err error) pluginapi.RequestInterceptResponse {
@@ -103,15 +126,15 @@ func (p *privacyFilterPlugin) handleFailure(sourceFormat string, err error) plug
 	code := "privacy_filter_internal_error"
 	message := "privacy filter could not safely inspect the request"
 	switch {
-	case errors.Is(err, privacyengine.ErrBudgetExceeded):
+	case isLimitError(err):
 		status = http.StatusRequestEntityTooLarge
 		code = "privacy_filter_limit_exceeded"
 		message = "request exceeds privacy inspection limits"
-	case errors.Is(err, errUnsupportedRequestShape):
+	case isUnsupportedError(err):
 		status = http.StatusUnprocessableEntity
 		code = "privacy_filter_unsupported_shape"
 		message = "request shape is not safely inspectable"
-	case errors.Is(err, io.ErrUnexpectedEOF), isJSONSyntaxError(err):
+	case isJSONError(err):
 		status = http.StatusBadRequest
 		code = "privacy_filter_invalid_json"
 		message = "request body is not valid JSON"
@@ -124,160 +147,37 @@ func failureReason(err error) string {
 	switch {
 	case errors.As(err, &blocked):
 		return "blocked_rule"
-	case errors.Is(err, privacyengine.ErrBudgetExceeded):
+	case isLimitError(err):
 		return "limit_exceeded"
-	case errors.Is(err, errUnsupportedRequestShape):
+	case isUnsupportedError(err):
 		return "unsupported_shape"
-	case isJSONSyntaxError(err):
+	case isJSONError(err):
 		return "invalid_json"
 	default:
 		return "internal_error"
 	}
 }
 
-func isJSONSyntaxError(err error) bool {
-	var syntax *json.SyntaxError
-	var typeErr *json.UnmarshalTypeError
-	return errors.As(err, &syntax) || errors.As(err, &typeErr)
+func isLimitError(err error) bool {
+	return errors.Is(err, privacyengine.ErrBudgetExceeded) ||
+		errors.Is(err, payload.ErrBodyTooLarge) ||
+		errors.Is(err, payload.ErrDepthLimit) ||
+		errors.Is(err, payload.ErrNodeLimit) ||
+		errors.Is(err, payload.ErrStringTooLarge) ||
+		errors.Is(err, payload.ErrReplacementLimit)
 }
 
-// redactRequestBody is retained only as a compatibility bridge while the
-// protocol-specific byte-preserving walkers are integrated. It uses UseNumber
-// so one redaction cannot corrupt unrelated integer identifiers.
-func (p *privacyFilterPlugin) redactRequestBody(ctx context.Context, body []byte, budget *privacyengine.Budget) ([]byte, int, error) {
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	var root map[string]any
-	if err := decoder.Decode(&root); err != nil {
-		return nil, 0, err
-	}
-	if err := ensureJSONEOF(decoder); err != nil {
-		return nil, 0, err
-	}
-
-	field := "messages"
-	items, ok := root[field]
-	if !ok {
-		field = "input"
-		items, ok = root[field]
-	}
-	if !ok {
-		return nil, 0, errUnsupportedRequestShape
-	}
-
-	changed := false
-	findingCount := 0
-	switch value := items.(type) {
-	case string:
-		out, findings, didChange, err := p.editText(ctx, value, budget)
-		if err != nil {
-			return nil, 0, err
-		}
-		findingCount += findings
-		if didChange {
-			root[field] = out
-			changed = true
-		}
-	case []any:
-		for _, item := range value {
-			itemMap, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			content, ok := itemMap["content"]
-			if !ok {
-				continue
-			}
-			didChange, findings, err := p.editContent(ctx, &content, budget)
-			if err != nil {
-				return nil, 0, err
-			}
-			findingCount += findings
-			if didChange {
-				itemMap["content"] = content
-				changed = true
-			}
-		}
-	default:
-		return nil, 0, fmt.Errorf("%w: %s has unsupported type", errUnsupportedRequestShape, field)
-	}
-	if !changed {
-		return nil, findingCount, nil
-	}
-	out, err := json.Marshal(root)
-	if err != nil {
-		return nil, 0, fmt.Errorf("marshal sanitized request: %w", err)
-	}
-	return out, findingCount, nil
+func isUnsupportedError(err error) bool {
+	return errors.Is(err, errUnsupportedRequestShape) ||
+		errors.Is(err, walker.ErrUnsupportedFormat) ||
+		errors.Is(err, walker.ErrInvalidShape) ||
+		errors.Is(err, walker.ErrUnsupportedShape) ||
+		errors.Is(err, walker.ErrAmbiguousPath) ||
+		errors.Is(err, payload.ErrRootNotObject)
 }
 
-func ensureJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("privacyfilter: multiple JSON documents")
-		}
-		return err
-	}
-	return nil
-}
-
-func (p *privacyFilterPlugin) editContent(ctx context.Context, content *any, budget *privacyengine.Budget) (bool, int, error) {
-	changed := false
-	findings := 0
-	switch value := (*content).(type) {
-	case string:
-		out, count, didChange, err := p.editText(ctx, value, budget)
-		if err != nil {
-			return false, 0, err
-		}
-		findings += count
-		if didChange {
-			*content = out
-			changed = true
-		}
-	case []any:
-		for i, part := range value {
-			partMap, ok := part.(map[string]any)
-			if !ok {
-				continue
-			}
-			text, ok := partMap["text"].(string)
-			if !ok {
-				continue
-			}
-			out, count, didChange, err := p.editText(ctx, text, budget)
-			if err != nil {
-				return false, 0, err
-			}
-			findings += count
-			if didChange {
-				partMap["text"] = out
-				value[i] = partMap
-				changed = true
-			}
-		}
-	}
-	return changed, findings, nil
-}
-
-func (p *privacyFilterPlugin) editText(ctx context.Context, text string, budget *privacyengine.Budget) (string, int, bool, error) {
-	result, err := p.engine.Redact(ctx, text, privacyengine.RequestOptions{
-		Budget:   budget,
-		Renderer: p.renderer,
-	})
-	if err != nil {
-		return text, 0, false, err
-	}
-	for _, finding := range result.Findings {
-		if _, blocked := p.blockRuleIDs[finding.RuleID]; blocked {
-			return text, len(result.Findings), false, &blockedFindingError{ruleID: finding.RuleID}
-		}
-	}
-	if p.cfg.Mode == modeAudit {
-		return text, len(result.Findings), false, nil
-	}
-	return result.Redacted, len(result.Findings), result.Hit(), nil
+func isJSONError(err error) bool {
+	return errors.Is(err, payload.ErrInvalidJSON)
 }
 
 func safeLogValue(value string) string {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -182,6 +183,22 @@ func (cfg privacyFilterConfig) renderer() (privacyengine.Renderer, error) {
 		overrides[kind] = replacement
 	}
 	return privacyengine.NewPlaceholderRenderer(overrides), nil
+}
+
+func validateReplacementSafety(engine *privacyengine.Engine, replacements map[string]string) error {
+	for name, replacement := range replacements {
+		if replacement == "" {
+			continue
+		}
+		findings, err := engine.Detect(context.Background(), replacement, privacyengine.RequestOptions{})
+		if err != nil {
+			return fmt.Errorf("validate replacement %q: %w", name, err)
+		}
+		if len(findings) > 0 {
+			return fmt.Errorf("invalid privacyfilter config: replacement %q is itself sensitive", name)
+		}
+	}
+	return nil
 }
 
 func replacementKind(name string) (privacyengine.Kind, bool) {

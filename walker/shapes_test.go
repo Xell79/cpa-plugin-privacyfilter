@@ -104,7 +104,7 @@ func TestInteractionsNestedStepsRequireSupportedEnvelope(t *testing.T) {
 	}
 }
 
-func TestClaudeToolResultProtectsSignedAndEncryptedValues(t *testing.T) {
+func TestClaudeToolResultProtectsReasoningIntegrityButScansGenericSignature(t *testing.T) {
 	const body = `{
   "messages":[{"role":"user","content":[{
     "type":"tool_result",
@@ -123,11 +123,12 @@ func TestClaudeToolResultProtectsSignedAndEncryptedValues(t *testing.T) {
 	result := mustWalk(t, "claude", body)
 	checkTargets(t, result, []wantTarget{
 		{`$["messages"][0]["content"][0]["content"][0]["safe"]`, "selected output", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
+		{`$["messages"][0]["content"][0]["content"][0]["signature"]`, "generic signature", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
 	})
 	assertValuesNotTargeted(t, result,
-		"toolu_1", "outer signature", "outer encrypted", "camel signature", "snake signature", "encrypted output", "generic signature")
-	if result.Opaque < 7 {
-		t.Fatalf("Opaque = %d, want at least 7 protected values", result.Opaque)
+		"toolu_1", "outer signature", "outer encrypted", "camel signature", "snake signature", "encrypted output")
+	if result.Opaque < 6 {
+		t.Fatalf("Opaque = %d, want at least 6 protected values", result.Opaque)
 	}
 }
 

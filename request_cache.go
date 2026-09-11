@@ -241,9 +241,9 @@ func newRequestScanCache(options RequestScanCacheOptions, now func() time.Time) 
 }
 
 // Acquire returns the state for requestID and context, creating it when needed.
-// Matching states are promoted in the LRU and have their sliding TTL refreshed.
-// An empty RequestID, or a disabled cache, always yields a fresh ephemeral state
-// and never creates a map entry.
+// It first removes the expired LRU suffix, then promotes matching states and
+// refreshes their sliding TTL. An empty RequestID, or a disabled cache, always
+// yields a fresh ephemeral state and never creates a map entry.
 func (c *RequestScanCache) Acquire(requestID string, context RequestScanContext) *RequestScanState {
 	if c == nil {
 		return NewEphemeralRequestScanState(context)
@@ -257,6 +257,9 @@ func (c *RequestScanCache) Acquire(requestID string, context RequestScanContext)
 
 	now := c.now()
 	c.mu.Lock()
+	if removed := c.pruneExpiredLocked(now); removed > 0 {
+		c.metrics.expirations.Add(uint64(removed))
+	}
 	if entry, ok := c.entries[requestID]; ok {
 		switch {
 		case c.expired(entry, now):
@@ -322,20 +325,25 @@ func (c *RequestScanCache) Prune() int {
 	}
 
 	now := c.now()
-	removed := 0
 	c.mu.Lock()
-	for element := c.lru.Back(); element != nil; {
-		previous := element.Prev()
-		entry := element.Value.(*requestScanCacheEntry)
-		if c.expired(entry, now) {
-			c.removeLocked(entry)
-			removed++
-		}
-		element = previous
-	}
+	removed := c.pruneExpiredLocked(now)
 	if removed > 0 {
 		c.metrics.expirations.Add(uint64(removed))
 	}
+	c.mu.Unlock()
+	return removed
+}
+
+// Clear releases every retained request and renderer state. It returns the
+// number removed. Aggregate counters remain available for final diagnostics.
+func (c *RequestScanCache) Clear() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	removed := len(c.entries)
+	c.entries = make(map[string]*requestScanCacheEntry)
+	c.lru.Init()
 	c.mu.Unlock()
 	return removed
 }
@@ -382,6 +390,24 @@ func (c *RequestScanCache) Stats() RequestScanCacheStats {
 
 func (c *RequestScanCache) expired(entry *requestScanCacheEntry, now time.Time) bool {
 	return c.ttl > 0 && now.Sub(entry.lastAccess) >= c.ttl
+}
+
+// pruneExpiredLocked removes the expired suffix of the LRU. lastAccess is
+// updated whenever an entry moves to the front, so a live tail means every
+// entry before it is live too.
+func (c *RequestScanCache) pruneExpiredLocked(now time.Time) int {
+	removed := 0
+	for element := c.lru.Back(); element != nil; {
+		entry := element.Value.(*requestScanCacheEntry)
+		if !c.expired(entry, now) {
+			break
+		}
+		previous := element.Prev()
+		c.removeLocked(entry)
+		removed++
+		element = previous
+	}
+	return removed
 }
 
 func (c *RequestScanCache) removeLocked(entry *requestScanCacheEntry) {
