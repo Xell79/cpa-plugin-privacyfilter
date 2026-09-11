@@ -133,15 +133,8 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 	if err != nil {
 		return err
 	}
-	if hasSteps {
-		if steps.kind != payload.KindArray {
-			return c.shape(steps, "array", "nested steps")
-		}
-		for _, nested := range steps.array {
-			if err = walkInteractionItem(c, nested, scope); err != nil {
-				return err
-			}
-		}
+	if hasSteps && steps.kind != payload.KindArray {
+		return c.shape(steps, "array", "nested steps")
 	}
 
 	typeNode, hasType, err := c.stringField(item, "type", false)
@@ -154,6 +147,11 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		}
 	}
 	if !hasType {
+		if hasSteps && roleOK {
+			if err = walkInteractionSteps(c, steps, scope); err != nil {
+				return err
+			}
+		}
 		processed, processErr := walkInteractionNaturalFields(c, item, scope, roleOK)
 		if processErr != nil {
 			return processErr
@@ -166,9 +164,25 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 
 	switch itemType := typeNode.token.Value; itemType {
 	case "user_input":
+		if !roleOK {
+			return nil
+		}
+		if hasSteps {
+			if err = walkInteractionSteps(c, steps, ScopeUser); err != nil {
+				return err
+			}
+		}
 		_, err = walkInteractionNaturalFields(c, item, ScopeUser, true)
 		return err
 	case "model_output":
+		if !roleOK {
+			return nil
+		}
+		if hasSteps {
+			if err = walkInteractionSteps(c, steps, ScopeAssistant); err != nil {
+				return err
+			}
+		}
 		_, err = walkInteractionNaturalFields(c, item, ScopeAssistant, true)
 		return err
 	case "thought", "reasoning":
@@ -204,6 +218,9 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		}
 		return walkInteractionToolOutput(c, output)
 	case "text", "input_text", "output_text":
+		if !roleOK {
+			return nil
+		}
 		text, _, fieldErr := c.stringField(item, "text", true)
 		if fieldErr != nil {
 			return fieldErr
@@ -219,6 +236,18 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		c.unsupported(item, fmt.Sprintf("unknown step type %q", itemType))
 		return nil
 	}
+}
+
+func walkInteractionSteps(c *collector, steps *node, scope Scope) error {
+	if steps.kind != payload.KindArray {
+		return c.shape(steps, "array", "nested steps")
+	}
+	for _, nested := range steps.array {
+		if err := walkInteractionItem(c, nested, scope); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func interactionRoleScope(c *collector, item *node, inherited Scope) (Scope, bool, error) {

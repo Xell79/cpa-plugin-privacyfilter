@@ -68,6 +68,69 @@ func TestUnknownContentShapesAreRecordedNotGuessed(t *testing.T) {
 	}
 }
 
+func TestInteractionsNestedStepsRequireSupportedEnvelope(t *testing.T) {
+	cases := []struct {
+		name            string
+		body            string
+		wantUnsupported int
+	}{
+		{
+			name:            "unknown type",
+			body:            `{"input":[{"type":"future_block","steps":["must remain skipped"]}]}`,
+			wantUnsupported: 1,
+		},
+		{
+			name:            "unknown role",
+			body:            `{"input":[{"role":"future_role","steps":["must remain skipped"]}]}`,
+			wantUnsupported: 1,
+		},
+		{
+			name:            "thought",
+			body:            `{"input":[{"type":"thought","steps":["must remain skipped"],"content":"private reasoning"}]}`,
+			wantUnsupported: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := mustWalk(t, "interactions", tc.body)
+			if len(result.Targets) != 0 {
+				t.Fatalf("opaque/unsupported nested steps yielded targets: %#v", result.Targets)
+			}
+			if result.UnsupportedCount != tc.wantUnsupported {
+				t.Fatalf("UnsupportedCount = %d, want %d", result.UnsupportedCount, tc.wantUnsupported)
+			}
+			assertValuesNotTargeted(t, result, "must remain skipped", "private reasoning")
+		})
+	}
+}
+
+func TestClaudeToolResultProtectsSignedAndEncryptedValues(t *testing.T) {
+	const body = `{
+  "messages":[{"role":"user","content":[{
+    "type":"tool_result",
+    "tool_use_id":"toolu_1",
+    "thoughtSignature":"outer signature",
+    "encrypted_content":"outer encrypted",
+    "content":[{
+      "safe":"selected output",
+      "thoughtSignature":"camel signature",
+      "thought_signature":"snake signature",
+      "encrypted_content":"encrypted output",
+      "signature":"generic signature"
+    }]
+  }]}]
+}`
+	result := mustWalk(t, "claude", body)
+	checkTargets(t, result, []wantTarget{
+		{`$["messages"][0]["content"][0]["content"][0]["safe"]`, "selected output", walker.ScopeToolOutput, walker.TargetKindJSONValue, walker.MutabilityDirect},
+	})
+	assertValuesNotTargeted(t, result,
+		"toolu_1", "outer signature", "outer encrypted", "camel signature", "snake signature", "encrypted output", "generic signature")
+	if result.Opaque < 7 {
+		t.Fatalf("Opaque = %d, want at least 7 protected values", result.Opaque)
+	}
+}
+
 func TestInvalidRootsAndFieldTypes(t *testing.T) {
 	cases := []struct {
 		name   string

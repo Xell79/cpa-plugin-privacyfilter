@@ -122,10 +122,10 @@ func walkClaudeContentBlock(c *collector, block *node, messageScope Scope) error
 		c.unsupported(block, "content array element is not an object")
 		return nil
 	}
-	if err := c.unique(block, "type", "text", "input", "content", "source", "thinking", "redacted_thinking", "signature", "id", "name", "tool_use_id"); err != nil {
+	if err := c.unique(block, "type", "text", "input", "content", "source", "thinking", "redacted_thinking", "signature", "thoughtSignature", "thought_signature", "encrypted_content", "id", "name", "tool_use_id"); err != nil {
 		return err
 	}
-	if err := c.markFields(block, "thinking", "redacted_thinking", "signature", "id", "name", "tool_use_id"); err != nil {
+	if err := c.markFields(block, "thinking", "redacted_thinking", "signature", "thoughtSignature", "thought_signature", "encrypted_content", "id", "name", "tool_use_id"); err != nil {
 		return err
 	}
 	typeNode, ok, err := c.stringField(block, "type", false)
@@ -192,10 +192,10 @@ func walkClaudeToolResult(c *collector, value *node) error {
 					}
 					switch typeNode.token.Value {
 					case "text":
-						if err = c.unique(item, "text", "signature", "id", "name", "tool_use_id"); err != nil {
+						if err = c.unique(item, "text", "signature", "thoughtSignature", "thought_signature", "encrypted_content", "id", "name", "tool_use_id"); err != nil {
 							return err
 						}
-						if err = c.markFields(item, "signature", "id", "name", "tool_use_id"); err != nil {
+						if err = c.markFields(item, "signature", "thoughtSignature", "thought_signature", "encrypted_content", "id", "name", "tool_use_id"); err != nil {
 							return err
 						}
 						text, _, textErr := c.stringField(item, "text", true)
@@ -231,6 +231,9 @@ var claudeProtectedOutputKeys = map[string]struct{}{
 	"thinking":          {},
 	"redacted_thinking": {},
 	"signature":         {},
+	"thoughtSignature":  {},
+	"thought_signature": {},
+	"encrypted_content": {},
 	"id":                {},
 	"name":              {},
 	"tool_use_id":       {},
