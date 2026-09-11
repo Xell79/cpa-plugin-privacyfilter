@@ -178,11 +178,18 @@ func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.si
 	}
 	raw, errHandle := handlePrivacyFilterABIMethod(context.Background(), methodName, requestBytes)
 	if errHandle != nil {
+		message := "privacy filter could not safely inspect the request"
+		if methodName == pluginabi.MethodPluginRegister || methodName == pluginabi.MethodPluginReconfigure {
+			// Lifecycle errors contain only configuration/rule diagnostics and are
+			// needed by operators to correct a plugin that cannot start. Request
+			// interceptor failures stay generic because they may be input-derived.
+			message = errHandle.Error()
+		}
 		writeABIResponse(response, abiFailureEnvelope(
 			methodName,
 			http.StatusServiceUnavailable,
 			"plugin_error",
-			"privacy filter could not safely inspect the request",
+			message,
 		))
 		return 0
 	}

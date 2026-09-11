@@ -35,6 +35,8 @@ func TestParseConfigRejectsUnknownFieldAndMultipleDocuments(t *testing.T) {
 
 func TestParseConfigPreservesLegacyFields(t *testing.T) {
 	raw := []byte(`
+enabled: true
+priority: -1000
 gitleaks_toml: custom.toml
 skip_models: [gpt-4]
 skip_formats: [openai]
@@ -43,8 +45,8 @@ skip_formats: [openai]
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.GitleaksTOML != "custom.toml" || len(cfg.SkipModels) != 1 || len(cfg.SkipFormats) != 1 {
-		t.Fatalf("legacy fields were not preserved: %+v", cfg)
+	if !cfg.Enabled || cfg.Priority != -1000 || cfg.GitleaksTOML != "custom.toml" || len(cfg.SkipModels) != 1 || len(cfg.SkipFormats) != 1 {
+		t.Fatalf("host and legacy fields were not accepted: %+v", cfg)
 	}
 	if cfg.GitleaksMode != "" {
 		t.Fatalf("legacy custom file should retain implicit replace mode, got %q", cfg.GitleaksMode)

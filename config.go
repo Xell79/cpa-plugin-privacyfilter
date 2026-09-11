@@ -52,6 +52,11 @@ type limitsConfig struct {
 }
 
 type privacyFilterConfig struct {
+	// CLIProxyAPI currently includes these host-owned fields in the YAML passed to
+	// native plugins. Accept but never use them; the host enforces both values.
+	Enabled  bool `yaml:"enabled"`
+	Priority int  `yaml:"priority"`
+
 	// Existing v0.2 fields remain valid.
 	GitleaksTOML string   `yaml:"gitleaks_toml"`
 	SkipModels   []string `yaml:"skip_models"`

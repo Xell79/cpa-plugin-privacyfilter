@@ -18,7 +18,7 @@ func terminateRequest(sourceFormat string, status int, code, message string) plu
 				"message": message,
 			},
 		}
-	case "gemini", "interactions":
+	case "gemini", "interactions", "gemini-cli":
 		body = map[string]any{
 			"error": map[string]any{
 				"code":    status,

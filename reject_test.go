@@ -52,6 +52,15 @@ func TestTerminateRequestUsesProtocolEnvelope(t *testing.T) {
 				}
 			},
 		},
+		{
+			format: "gemini-cli",
+			check: func(t *testing.T, body map[string]any) {
+				errorBody, ok := body["error"].(map[string]any)
+				if !ok || errorBody["status"] != "INVALID_ARGUMENT" {
+					t.Fatalf("Gemini CLI error body = %#v", body)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.format, func(t *testing.T) {

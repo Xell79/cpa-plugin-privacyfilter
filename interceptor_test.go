@@ -192,15 +192,20 @@ func TestRedactRequestBody_SecretDetectionUsesEmbeddedRules(t *testing.T) {
 
 func TestInterceptRequest_InvalidJSONFailsClosed(t *testing.T) {
 	p := newTestPlugin(t)
-	resp, err := p.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
-		SourceFormat: "openai",
-		Body:         []byte(`not valid json with email test@example.com`),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !resp.Terminate || resp.StatusCode != 400 {
-		t.Fatalf("invalid JSON response = %+v, want terminate 400", resp)
+	for _, body := range [][]byte{
+		nil,
+		[]byte(`not valid json with email test@example.com`),
+	} {
+		resp, err := p.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
+			SourceFormat: "openai",
+			Body:         body,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !resp.Terminate || resp.StatusCode != 400 {
+			t.Fatalf("invalid JSON response = %+v, want terminate 400", resp)
+		}
 	}
 }
 

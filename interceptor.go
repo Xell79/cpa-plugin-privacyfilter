@@ -55,7 +55,7 @@ func (p *privacyFilterPlugin) interceptRequest(ctx context.Context, req pluginap
 		return pluginapi.RequestInterceptResponse{}, nil
 	}
 	if len(req.Body) == 0 {
-		return pluginapi.RequestInterceptResponse{}, nil
+		return p.handleFailure(req.SourceFormat, payload.ErrInvalidJSON), nil
 	}
 
 	modelContext := req.RequestedModel
