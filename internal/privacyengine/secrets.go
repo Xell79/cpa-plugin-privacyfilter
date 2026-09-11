@@ -14,15 +14,14 @@ import (
 )
 
 const (
-	entropyMin       = 4.0
-	entropyMinStrict = 4.8
-	contextLookback  = 30 // bytes
+	entropyMin              = 4.0
+	entropyMinStrict        = 4.8
+	contextLookback         = 30 // bytes
+	contextOverlapLookahead = 64 // bytes into a candidate
 )
 
 var reContextSecret = regexp.MustCompile(
 	`(?i)(密码|口令|密钥|password|passwd|pwd|secret|token|api[_\s-]?key)\s*(?:是|为|:|：|=)\s*['"]?([^\s'"，。；;]{4,})`)
-
-var reEntropyToken = regexp.MustCompile(`[A-Za-z0-9+/=_\-]{20,}`)
 
 var reSecretContext = regexp.MustCompile(
 	`(?i)(?:password|passwd|pwd|secret|token|api[_\s-]?key|access[_\s-]?key|bearer|authorization|credential|jwt|密码|口令|密钥|凭证|令牌|鉴权)`)
@@ -134,7 +133,7 @@ func (e *Engine) detectSecrets(ctx context.Context, text string, collector *span
 		return err
 	}
 
-	return forEachMatchIndex(ctx, reEntropyToken, text, func(start, end int) error {
+	return forEachEntropyToken(ctx, text, func(start, end int) error {
 		candidate := text[start:end]
 		strong := hasStrongSecretContext(text, start, end)
 		if !strong && isOnPathOrURLBoundary(text, start, end) {
@@ -201,7 +200,7 @@ func hasSecretContext(text string, start, end int) bool {
 		return false
 	}
 	lookbackStart := contextStart(text, start)
-	return reSecretContext.MatchString(text[lookbackStart:end])
+	return reSecretContext.MatchString(text[lookbackStart:contextProbeEnd(text, start, end)])
 }
 
 // hasStrongSecretContext requires the final semantic keyword to touch the
@@ -218,7 +217,7 @@ func hasStrongSecretContext(text string, start, end int) bool {
 	if reAuthHeaderPrefix.MatchString(text[lookbackStart:start]) {
 		return true
 	}
-	region := text[lookbackStart:end]
+	region := text[lookbackStart:contextProbeEnd(text, start, end)]
 	lastStart, lastEnd, found := lastMatchIndex(reSecretContext, region)
 	if !found {
 		return false
@@ -239,6 +238,17 @@ func hasStrongSecretContext(text string, start, end int) bool {
 		}
 	}
 	return true
+}
+
+func contextProbeEnd(text string, start, end int) int {
+	probeEnd := start + contextOverlapLookahead
+	if probeEnd < start || probeEnd > end {
+		probeEnd = end
+	}
+	if probeEnd > len(text) {
+		probeEnd = len(text)
+	}
+	return probeEnd
 }
 
 func contextStart(text string, start int) int {
@@ -397,6 +407,38 @@ func lineContaining(text string, start, end int) string {
 		lineEnd = end + relative
 	}
 	return text[lineStart:lineEnd]
+}
+
+func forEachEntropyToken(ctx context.Context, text string, visit func(start, end int) error) error {
+	start := -1
+	for i := 0; i <= len(text); i++ {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		allowed := i < len(text) && isEntropyTokenByte(text[i])
+		if allowed {
+			if start < 0 {
+				start = i
+			}
+			continue
+		}
+		if start >= 0 && i-start >= 20 {
+			if err := visit(start, i); err != nil {
+				return err
+			}
+		}
+		start = -1
+	}
+	return nil
+}
+
+func isEntropyTokenByte(value byte) bool {
+	return value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' ||
+		value == '+' || value == '/' || value == '=' || value == '_' || value == '-'
 }
 
 func forEachMatchIndex(ctx context.Context, re *regexp.Regexp, text string, visit func(start, end int) error) error {

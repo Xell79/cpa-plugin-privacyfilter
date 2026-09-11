@@ -96,6 +96,22 @@ func detectPII(ctx context.Context, text string, collector *spanCollector) error
 	}); err != nil {
 		return err
 	}
+	hasDigit := false
+	for i := 0; i < len(text); i++ {
+		if i&4095 == 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		if isDigit(text[i]) {
+			hasDigit = true
+			break
+		}
+	}
+	if !hasDigit {
+		return nil
+	}
+
 	if err := forEachMatchIndex(ctx, rePhoneCN, text, func(start, end int) error {
 		if !digitBounded(text, start, end) {
 			return nil
