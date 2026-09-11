@@ -6,28 +6,27 @@ import (
 	"testing"
 )
 
-// TestNewFilter_UsesEmbeddedRules simulates a store install: an empty plugin
-// directory with no rules/gitleaks.toml sidecar. newFilter must still load the
-// embedded rules (loaded rules > 0), proving the filter works without a sidecar.
-func TestNewFilter_UsesEmbeddedRules(t *testing.T) {
-	emptyDir := t.TempDir()
-
-	f, err := newFilter(emptyDir, defaultConfig())
+// TestNewEngineUsesEmbeddedRules simulates a store install: an empty plugin
+// directory with no sidecar. Rules must compile directly from embedded bytes;
+// the plugin must not materialize sensitive policy state in a temporary file.
+func TestNewEngineUsesEmbeddedRules(t *testing.T) {
+	engine, report, err := newEngine(t.TempDir(), defaultConfig())
 	if err != nil {
-		t.Fatalf("newFilter() with embedded rules error = %v", err)
+		t.Fatalf("newEngine() with embedded rules: %v", err)
 	}
-	rules, _ := f.Stats()
-	if rules == 0 {
-		t.Fatal("expected embedded rules to be loaded, got 0 rules")
+	loaded, skipped := engine.Stats()
+	if loaded != 217 || skipped != 5 {
+		t.Fatalf("stats = %d loaded, %d skipped; report=%+v", loaded, skipped, report)
 	}
-	t.Logf("loaded %d embedded rules without sidecar file", rules)
+	if report.RulesSeen != 222 {
+		t.Fatalf("rules seen = %d, want 222", report.RulesSeen)
+	}
 
-	// Temp files written during materialization must be cleaned up.
 	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "privacyfilter-gitleaks-*.toml"))
 	if err != nil {
 		t.Fatalf("glob temp rules: %v", err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("temp rules file was not cleaned up: %v", matches)
+		t.Fatalf("unexpected temporary rules file: %v", matches)
 	}
 }

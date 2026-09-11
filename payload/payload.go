@@ -235,6 +235,11 @@ func DefaultLimits() Limits {
 	}
 }
 
+// Normalized validates limits and fills zero fields with safe defaults.
+func (l Limits) Normalized() (Limits, error) {
+	return l.normalized()
+}
+
 func (l Limits) normalized() (Limits, error) {
 	if l.MaxBodyBytes < 0 || l.MaxDepth < 0 || l.MaxNodes < 0 ||
 		l.MaxStringBytes < 0 || l.MaxReplacements < 0 || l.MaxReplacementBytes < 0 {

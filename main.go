@@ -20,11 +20,17 @@ func buildPlugin(configYAML []byte, pluginDir string) (pluginapi.Plugin, error) 
 		pluginDir: pluginDir,
 	}
 
-	f, errFilter := newFilter(pluginDir, cfg)
-	if errFilter != nil {
-		return pluginapi.Plugin{}, errFilter
+	engine, _, errEngine := newEngine(pluginDir, cfg)
+	if errEngine != nil {
+		return pluginapi.Plugin{}, errEngine
 	}
-	p.filter = f
+	renderer, errRenderer := cfg.renderer()
+	if errRenderer != nil {
+		return pluginapi.Plugin{}, errRenderer
+	}
+	p.engine = engine
+	p.renderer = renderer
+	p.blockRuleIDs = cfg.blockRuleSet()
 
 	return pluginapi.Plugin{
 		SchemaVersion: implementedSchemaVersion,
