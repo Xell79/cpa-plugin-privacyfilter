@@ -124,7 +124,12 @@ def main() -> None:
             separators=(",", ":"),
         ).encode()
         status, envelope = invoke(plugin.call, plugin.free_buffer, "plugin.register", request)
-        require(status == 0 and envelope.get("ok") is True, "registration failed")
+        if status != 0 or envelope.get("ok") is not True:
+            error = envelope.get("error")
+            code = error.get("code", "missing") if isinstance(error, dict) else "missing"
+            message = error.get("message", "missing") if isinstance(error, dict) else "missing"
+            detail = " ".join(str(message).split())[:512]
+            raise SystemExit(f"registration failed: status={status} code={code} message={detail}")
         registration = envelope.get("result", {})
         metadata = registration.get("metadata", {})
         require(registration.get("schema_version") == 2, "RPC schema negotiation mismatch")
