@@ -47,23 +47,27 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 var privacyFilterABIState = struct {
 	sync.RWMutex
-	host         *C.cliproxy_host_api
-	plugin       *privacyFilterPlugin
-	runtime      *runtimeState
-	shuttingDown bool
-	inFlight     sync.WaitGroup
+	host           *C.cliproxy_host_api
+	plugin         *privacyFilterPlugin
+	runtime        *runtimeState
+	shuttingDown   bool
+	nativeInFlight sync.WaitGroup
+	inFlight       sync.WaitGroup
 }{}
 
 const (
@@ -77,6 +81,15 @@ const (
 	// maxABIRequestBytes is checked before C.GoBytes duplicates the host payload.
 	// Request bodies have their own tighter configurable limit at the walker.
 	maxABIRequestBytes = C.size_t(64 << 20)
+
+	nativeScanConcurrency   = 4
+	nativeScanAdmissionWait = 100 * time.Millisecond
+	nativeScanDeadline      = 10 * time.Second
+)
+
+var (
+	errNativeScanAdmission = errors.New("privacyfilter: native scan admission unavailable")
+	nativeScanSlots        = make(chan struct{}, nativeScanConcurrency)
 )
 
 type abiEnvelope struct {
@@ -143,40 +156,91 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 
 //export PrivacyFilterPluginCall
 func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) (result C.int) {
+	result = 1
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
 	}
 	methodName := ""
-	if method != nil {
-		methodName = C.GoString(method)
-	}
 	defer func() {
 		if recover() == nil {
 			return
 		}
-		writeABIResponse(response, abiPanicEnvelope(methodName))
-		result = 0
+		if writeABIResponse(response, abiPanicEnvelope(methodName)) {
+			result = 0
+		}
 	}()
+	if method != nil {
+		methodName = C.GoString(method)
+	}
 
 	if method == nil {
-		writeABIResponse(response, abiErrorEnvelope("invalid_method", "method is required"))
-		return 0
+		return writeABIResult(response, abiErrorEnvelope("invalid_method", "method is required"))
 	}
-	var requestBytes []byte
-	if request != nil && requestLen > 0 {
-		if requestLen > maxABIRequestBytes {
-			writeABIResponse(response, abiFailureEnvelope(
+	if requestLen > maxABIRequestBytes {
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusRequestEntityTooLarge,
+			"request_too_large",
+			"privacy filter request payload exceeds the native plugin limit",
+		))
+	}
+	if requestLen > 0 && request == nil {
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusServiceUnavailable,
+			"invalid_request",
+			"privacy filter received an invalid native request buffer",
+		))
+	}
+
+	ctx := context.Background()
+	cancel := func() {}
+	if isRequestInterceptMethod(methodName) {
+		done, errBegin := beginNativeScanCall()
+		if errBegin != nil {
+			return writeABIResult(response, abiFailureEnvelope(
 				methodName,
-				http.StatusRequestEntityTooLarge,
-				"request_too_large",
-				"privacy filter request payload exceeds the native plugin limit",
+				http.StatusServiceUnavailable,
+				"plugin_unavailable",
+				"privacy filter is not available for request inspection",
 			))
-			return 0
 		}
+		defer done()
+
+		ctx, cancel = context.WithTimeout(ctx, nativeScanDeadline)
+		defer cancel()
+		release, errAdmission := acquireNativeScan(ctx, nativeScanAdmissionWait)
+		if errAdmission != nil {
+			code := "privacy_filter_busy"
+			message := "privacy filter scan capacity is temporarily unavailable"
+			if errors.Is(errAdmission, context.DeadlineExceeded) {
+				code = "privacy_filter_deadline"
+				message = "privacy filter inspection deadline exceeded"
+			}
+			return writeABIResult(response, abiFailureEnvelope(
+				methodName,
+				http.StatusServiceUnavailable,
+				code,
+				message,
+			))
+		}
+		defer release()
+	}
+
+	var requestBytes []byte
+	if requestLen > 0 {
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
-	raw, errHandle := handlePrivacyFilterABIMethod(context.Background(), methodName, requestBytes)
+	raw, errHandle := handlePrivacyFilterABIMethod(ctx, methodName, requestBytes)
+	if isRequestInterceptMethod(methodName) && ctx.Err() != nil {
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusServiceUnavailable,
+			"privacy_filter_deadline",
+			"privacy filter inspection deadline exceeded",
+		))
+	}
 	if errHandle != nil {
 		message := "privacy filter could not safely inspect the request"
 		if methodName == pluginabi.MethodPluginRegister || methodName == pluginabi.MethodPluginReconfigure {
@@ -185,16 +249,53 @@ func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.si
 			// interceptor failures stay generic because they may be input-derived.
 			message = errHandle.Error()
 		}
-		writeABIResponse(response, abiFailureEnvelope(
+		return writeABIResult(response, abiFailureEnvelope(
 			methodName,
 			http.StatusServiceUnavailable,
 			"plugin_error",
 			message,
 		))
-		return 0
 	}
-	writeABIResponse(response, raw)
-	return 0
+	return writeABIResult(response, raw)
+}
+
+func isRequestInterceptMethod(method string) bool {
+	return method == pluginabi.MethodRequestInterceptBefore || method == pluginabi.MethodRequestInterceptAfter
+}
+
+func acquireNativeScan(ctx context.Context, wait time.Duration) (func(), error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if wait <= 0 {
+		select {
+		case nativeScanSlots <- struct{}{}:
+			return func() { <-nativeScanSlots }, nil
+		default:
+			return nil, errNativeScanAdmission
+		}
+	}
+
+	timer := time.NewTimer(wait)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+	select {
+	case nativeScanSlots <- struct{}{}:
+		return func() { <-nativeScanSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, errNativeScanAdmission
+	}
 }
 
 //export PrivacyFilterPluginFree
@@ -212,6 +313,7 @@ func PrivacyFilterPluginShutdown() {
 	privacyFilterABIState.host = nil
 	runtime := privacyFilterABIState.runtime
 	privacyFilterABIState.Unlock()
+	privacyFilterABIState.nativeInFlight.Wait()
 	privacyFilterABIState.inFlight.Wait()
 	if runtime != nil && runtime.cache != nil {
 		runtime.cache.Clear()
@@ -309,6 +411,10 @@ func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 	privacyFilterABIState.plugin = p
 	privacyFilterABIState.shuttingDown = false
 	privacyFilterABIState.Unlock()
+	log.WithFields(log.Fields{
+		"version":  pluginVersion,
+		"revision": pluginRevision,
+	}).Info("privacyfilter plugin registered")
 	return abiOKEnvelope(abiRegistration{
 		SchemaVersion: negotiatedSchema,
 		Metadata:      plugin.Metadata,
@@ -333,8 +439,22 @@ func handlePrivacyFilterQuiesce() ([]byte, error) {
 	privacyFilterABIState.Lock()
 	privacyFilterABIState.shuttingDown = true
 	privacyFilterABIState.Unlock()
+	privacyFilterABIState.nativeInFlight.Wait()
 	privacyFilterABIState.inFlight.Wait()
 	return abiOKEnvelope(struct{}{})
+}
+
+func beginNativeScanCall() (func(), error) {
+	privacyFilterABIState.Lock()
+	defer privacyFilterABIState.Unlock()
+	if privacyFilterABIState.shuttingDown {
+		return nil, fmt.Errorf("privacyfilter plugin is shutting down")
+	}
+	if privacyFilterABIState.plugin == nil {
+		return nil, fmt.Errorf("privacyfilter plugin is not registered")
+	}
+	privacyFilterABIState.nativeInFlight.Add(1)
+	return privacyFilterABIState.nativeInFlight.Done, nil
 }
 
 func beginPrivacyFilterPluginCall() (*privacyFilterPlugin, func(), error) {
@@ -400,14 +520,22 @@ func abiFailureEnvelope(method string, status int, code, message string) []byte 
 	return abiErrorEnvelope(code, message)
 }
 
-func writeABIResponse(response *C.cliproxy_buffer, raw []byte) {
+func writeABIResult(response *C.cliproxy_buffer, raw []byte) C.int {
+	if !writeABIResponse(response, raw) {
+		return 1
+	}
+	return 0
+}
+
+func writeABIResponse(response *C.cliproxy_buffer, raw []byte) bool {
 	if response == nil || len(raw) == 0 {
-		return
+		return false
 	}
 	ptr := C.CBytes(raw)
 	if ptr == nil {
-		return
+		return false
 	}
 	response.ptr = ptr
 	response.len = C.size_t(len(raw))
+	return true
 }

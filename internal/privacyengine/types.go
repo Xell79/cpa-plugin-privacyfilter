@@ -19,13 +19,14 @@ const (
 )
 
 const (
-	rulePIIEmail      = "pii.email"
-	rulePIIPhoneCN    = "pii.phone-cn"
-	rulePIIIDCardCN   = "pii.id-card-cn"
-	rulePIIBankCard   = "pii.bank-card"
-	rulePIIIPv4       = "pii.ipv4"
-	ruleContextSecret = "builtin.context-secret"
-	ruleHighEntropy   = "builtin.high-entropy"
+	rulePIIEmail        = "pii.email"
+	rulePIIPhoneCN      = "pii.phone-cn"
+	rulePIIIDCardCN     = "pii.id-card-cn"
+	rulePIIBankCard     = "pii.bank-card"
+	rulePIIIPv4         = "pii.ipv4"
+	ruleContextSecret   = "builtin.context-secret"
+	ruleHighEntropy     = "builtin.high-entropy"
+	ruleCredentialField = "builtin.credential-field"
 )
 
 // Finding describes a sensitive byte span. Start is inclusive and End is
@@ -68,6 +69,29 @@ func (f RendererFunc) Render(ctx context.Context, finding Finding, plaintext str
 	return f(ctx, finding, plaintext)
 }
 
+// ToolScope identifies whether a structured string came from recognized tool
+// input or output. Empty means no tool scope and disables credential-field
+// whole-value matching.
+type ToolScope string
+
+const (
+	ToolScopeInput  ToolScope = "tool-input"
+	ToolScopeOutput ToolScope = "tool-output"
+)
+
+const MaxFieldContextAncestors = 4
+
+// FieldContext contains bounded field names and semantic flags only. It must
+// never contain request values or complete paths.
+type FieldContext struct {
+	ImmediateKey  string
+	Ancestors     [MaxFieldContextAncestors]string
+	AncestorCount uint8
+	ToolScope     ToolScope
+	Structured    bool
+	Encoded       bool
+}
+
 // RequestOptions carries request-scoped state. Reuse one Budget across all
 // text nodes in a request so byte, finding, and node limits are cumulative.
 // Renderer is consulted only by Redact and may itself hold request-scoped
@@ -77,6 +101,10 @@ type RequestOptions struct {
 	Budget           *Budget
 	Renderer         Renderer
 	PreferredRuleIDs map[string]struct{}
+	FieldContext     FieldContext
+	// PreservePlaceholder marks a renderer-produced configured placeholder. It
+	// carries no request value and still consumes the ordinary node/byte budget.
+	PreservePlaceholder bool
 }
 
 var (

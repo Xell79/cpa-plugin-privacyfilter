@@ -181,7 +181,16 @@ func (e *Engine) detect(ctx context.Context, text string, options RequestOptions
 		return nil, err
 	}
 
+	if options.PreservePlaceholder {
+		return nil, nil
+	}
+
 	collector := newSpanCollector(len(text), budget.remainingFindings(), options.PreferredRuleIDs)
+	if !credentialFieldApplies(options.FieldContext) || !isCredentialPlaceholder(text) {
+		if err := detectCredentialField(text, collector, options.FieldContext); err != nil {
+			return nil, err
+		}
+	}
 	if err := detectPII(ctx, text, collector); err != nil {
 		return nil, err
 	}

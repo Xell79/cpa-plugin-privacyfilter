@@ -1,0 +1,72 @@
+cpa-plugin-privacyfilter provenance and attribution
+================================================
+
+This repository is the ahoo security-hardened fork of the original CLIProxyAPI
+Privacy Filter plugin by rheodev (Frank). The original repository and upstream
+base retained in this Git history are:
+
+- https://github.com/rheodev/cpa-plugin-privacyfilter
+- original initialization commit d1002dc44927d267dfdbaf40437dd9685465613a
+- upstream v0.2.0 base a3db9d1f951d6d34cf7f00029cb71ff46a600d1f
+
+The root MIT license preserves Frank's copyright. The hardening and release work
+in this fork is Copyright (c) 2026 ahoo and is also licensed under MIT.
+
+Privacy detection engine
+------------------------
+
+The internal privacy engine derives portions of its PII and secret detection
+from PackyMe/privacy-filter at the immutable commit below:
+
+- https://github.com/PackyMe/privacy-filter/commit/64b8de3c206059b187d65381189b70c267550392
+
+Those portions are used under the MIT License. The PackyMe copyright and full
+license are preserved in internal/privacyengine/LICENSE and in the generated
+THIRD_PARTY_LICENSES.md report.
+
+Protocol-safe JSON scanner
+--------------------------
+
+The byte-preserving scanner and related protocol-safety work adapt changes from
+the ToS0 fork at these immutable commits:
+
+- https://github.com/ToS0/cpa-plugin-privacyfilter/commit/c2b9f3a5f662f6f378007c3389af4385d1c89bc5
+- https://github.com/ToS0/cpa-plugin-privacyfilter/commit/4947e0d9f2641493bf462c9d3bf44b8559bfb627
+
+Those changes are used under the MIT License. The source license is preserved
+at third_party/tos0.LICENSE and in THIRD_PARTY_LICENSES.md.
+
+CLIProxyAPI native plugin SDK
+-----------------------------
+
+This plugin links the CLIProxyAPI v7.2.157 Go SDK from:
+
+- module: github.com/router-for-me/CLIProxyAPI/v7 v7.2.157
+- source commit: 09a29bd345bc44c473abe7fd07859e32df2ea543
+- repository: https://github.com/router-for-me/CLIProxyAPI
+
+The SDK is used under the MIT License. Its copyright and full license are
+included in THIRD_PARTY_LICENSES.md.
+
+Embedded Gitleaks rules
+-----------------------
+
+rules/gitleaks.toml is the exact default Gitleaks v8.30.0 rule snapshot at:
+
+- repository: https://github.com/gitleaks/gitleaks
+- source commit: 6eaad039603a4de39fddd1cf5f727391efe9974e
+- source path: config/gitleaks.toml
+- SHA-256: e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf
+
+The snapshot is embedded as data and is used under the Gitleaks MIT License.
+The Zachary Rice copyright and full license are preserved at
+third_party/gitleaks.LICENSE and in THIRD_PARTY_LICENSES.md. The immutable
+fetch-and-hash procedure is scripts/update-rules.sh.
+
+Linked dependencies
+-------------------
+
+THIRD_PARTY_LICENSES.md is generated from the exact Go modules linked into this
+plugin plus the bundled components above. Its generator is
+.github/scripts/generate-license-report.py. CI regenerates and compares the
+report so dependency or license changes cannot silently leave it stale.

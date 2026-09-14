@@ -2,37 +2,52 @@
 
 [English](README.md) | 简体中文
 
-面向 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的协议感知型、仅请求侧隐私过滤插件。它会识别模型实际可见的文本，在请求离开本机、发往上游模型前脱敏 PII 和凭证；默认情况下，无法安全检查的请求会被主动拦截。
+面向 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的协议感知型请求侧隐私过滤插件。它会在受支持的请求文本发送给上游模型前，对选定的 PII 和凭证做不可逆脱敏；默认主动终止无法安全检查的请求。
 
-> 当前分支是 v0.3 开发版本，已在 CLIProxyAPI v7.2.157 上完成验证，但尚未发布公开的 v0.3 Release。
+> **不要安装官方 Plugin Store 中名为 `privacyfilter` 的条目。** 截至 2026-09-15，该 [Store 记录](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/blob/main/registry.json) 属于 `rheodev`，并指向他们的旧版 v0.2.0 实现。此 `ahoo` 分支不会申请另一个冲突的 Store 标识。只应安装从本仓库不可变 Release 下载并校验过 checksum 的产物。
+>
+> 只有在不可变的 GitHub `v0.3.0` Release 已存在后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
 
-## 安全特性
+## 安全模型
 
 - 理解 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages、Gemini GenerateContent 和 Interactions 请求结构。
-- 检查 system、user、assistant 历史，以及工具/函数的输入和输出。
-- 识别常见 PII 和 Gitleaks 风格凭证，包括常见云厂商 AK/SK。
-- 只改写协议明确选中的 JSON 字符串 token；未修改的空白、字段顺序、重复键、数字字面量以及 `9007199254740993` 这类大整数保持原始字节不变。
-- JSON 对象键永远不会被当作敏感值改写。
-- 使用请求内、不可逆的类型化占位符。同一请求中的相同值复用同一占位符，同类型不同值会编号区分。
-- 默认配置为 `mode: redact`、`on_error: block`。
-- 使用 schema 2 的主动终止响应，不依赖返回 Go interceptor error，因此被拒绝的请求不会继续发往上游。
-- 根据 Request ID 和脱敏后请求体哈希去重未变化的 BeforeAuth/AfterAuth 扫描；在 `request.complete` 时释放状态，并提供 TTL/LRU 兜底。
-- 插件自身的检查日志只记录数量和有界元数据，不记录命中明文或请求体。
+- 检查协议 walker 明确分类为模型可见的 system、user、assistant/replay、工具输入/输出、工具描述和工具 schema 文本。
+- 脱敏常见 PII、Gitleaks 风格密钥，以及结构化工具数据中位于精确高置信凭证字段下的短值。
+- 只改写选中的 JSON 字符串值，永不改写对象键。未修改的空白、成员顺序、重复键、转义和数字字面量保持原始字节不变。
+- 使用请求内不可逆占位符。同一逻辑请求中的相同值复用一个占位符，同类型不同值会编号区分。第二次 interceptor 扫描只信任本请求实际生成过的占位符。
+- 为已知协议对象中的每个字符串分配一种明确处置：可脱敏内容、明确定义的不透明控制/完整性数据，或不支持。含未知字符串的扩展会 fail closed，不会被静默跳过。
+- 默认使用 `mode: redact`、`on_error: block`、内嵌规则、无模型/格式绕过、无 blocking rule ID。
+- 使用 RPC schema 2 主动终止。被拒绝的请求以成功的插件 RPC envelope 返回，并设置 `Terminate: true`，避免宿主因普通 interceptor error 的 fail-open 行为而继续转发。
+- 日志只包含计数和有界元数据；插件不会记录命中值或请求体。
+
+这是**不可逆脱敏**，不是可恢复 tokenization。插件不会保留原始值供后续还原。
 
 ## 支持的请求格式
 
-`SourceFormat` 必须精确匹配。支持值和检查范围如下：
+`SourceFormat` 必须精确匹配：
 
-| `SourceFormat` | 请求协议 | 检查的模型可见内容 |
+| `SourceFormat` | 请求协议 | 检查内容 |
 |---|---|---|
-| `openai` | Chat Completions | `messages[*].content`、多段文本、旧版/新版函数工具参数、tool role 输出 |
-| `openai-response` | Responses | `instructions`、`input` 消息与文本、prompt variables、函数参数、函数及自定义工具输出 |
-| `claude` | Anthropic Messages | 顶层 `system`、消息文本、`tool_use.input`、字符串或结构化 `tool_result.content` |
-| `gemini` | Gemini GenerateContent | system instruction、content 文本、函数调用参数/响应、可执行代码和执行输出 |
-| `interactions` | Interactions | system instruction、嵌套 input/steps/content、函数参数和函数结果/输出 |
+| `openai` | Chat Completions | 消息文本、多段文本、旧版/新版函数参数、tool role 输出、函数描述和参数 schema |
+| `openai-response` | Responses | instructions、input/replay 文本、prompt variables，以及 pinned input-item union 已覆盖的 function/custom/MCP/shell/search/code/tool 历史、函数描述、输入/输出 schema 和 text-format schema |
+| `claude` | Anthropic Messages | 顶层 system、消息文本、`tool_use.input`、字符串/结构化 `tool_result.content`、工具描述和 input schema |
+| `gemini` | Gemini GenerateContent | system/content 文本、函数参数/结果、可执行代码/结果、display name、函数描述和参数/响应 schema |
+| `interactions` | Interactions | system instruction、嵌套 input/steps/content、函数输入/输出、工具描述和 schema |
 | `gemini-cli` | Interactions 兼容别名 | 与 `interactions` 相同 |
 
-已知的协议级完整性字段和控制字段不会被改写，包括 model/role/type、工具名称和 ID、call ID、签名、加密或签名 reasoning、协议级 URL/文件引用、工具 schema 以及二进制/base64 附件。对于无法识别的协议 block 或有歧义的控制字段，默认 fail-closed 策略会直接拒绝，而不是猜测其含义。
+已知控制和完整性字段保持不透明，包括 model/role/type discriminator、工具名称和 ID、call ID、签名、加密 reasoning、二进制/base64 数据以及明确定义的 URL/文件引用。不支持的 Responses 根级工具类型会被拒绝，而不是作为不透明对象转发。
+
+### 结构化凭证字段
+
+在已识别的结构化工具输入/输出中，精确凭证字段下的非空、非模板字符串会被整值脱敏，即使值很短或熵很低。支持的精确字段族包括：
+
+- `AK`、`SK`、`api_key`、`api_secret`、`api_secret_key`；
+- `access_key`、`access_key_id`、`secret_key`、`secret_access_key`；
+- AWS access/secret key 字段、`client_secret` 和 `private_key`；
+- access/API/auth/refresh/session/ID/client/secret/bearer/OAuth token 字段；
+- `password`、`passwd`、`pwd`、`credential`、`secret`、`secrets` 和 `authorization`。
+
+字段键在 64 字节上限内进行 ASCII case-fold，并把 `-` 归一化为 `_`；匹配发生在归一化之后，`apikey`、`accesskeyid` 等连续形式作为精确条目覆盖相应 camelCase 字段。`AK` 和 `SK` 只在其自身是直接字段名时触发整值处理；它们不会像较长且歧义较小的凭证字段名那样向后代字符串传播。这样会保留普通的 DynamoDB `{"SK":{"S":"..."}}` 结构，同时仍脱敏 `{"SK":"..."}`。这是精确 allowlist，不是子串匹配：`monkey`、`token_id`、`api_key_name`、`secret_name`、`client_id` 和任意 `MY_SECRET_KEY` 风格名称不会仅凭字段名触发整值规则。通用 PII/密钥 detector 仍会检查这些字段值。模板变量和已识别的 mask 占位符保持不变。
 
 ## 检测能力与占位符
 
@@ -43,11 +58,12 @@
 - 通过 Luhn 校验的银行卡号；
 - IPv4 地址；
 - 带上下文和高熵特征的密钥检测；
-- `rules/gitleaks.toml` 固定版本规则中，与请求文本兼容的 regex、keyword、entropy、capture group 和 allowlist 语义。
+- 精确结构化凭证字段检测；
+- pinned Gitleaks 快照中适用于请求文本的 regex、keyword、entropy、capture group 和 allowlist 语义。
 
 默认占位符：
 
-| 类型 | 第一个值 | 第二个不同值 |
+| 类型 | 第一个不同值 | 第二个不同值 |
 |---|---|---|
 | `email` | `[邮箱]` | `[邮箱#2]` |
 | `phone` | `[电话]` | `[电话#2]` |
@@ -56,45 +72,54 @@
 | `ip` | `[IP]` | `[IP#2]` |
 | `secret` | `[密钥]` | `[密钥#2]` |
 
-同一值重复出现时会复用占位符。映射只存在于一个逻辑请求内且不可逆；缓存仅保留哈希和替换标签，不保留命中明文。
+请求缓存只保留哈希和替换标签，不保留命中明文或可恢复映射。
+
+## 固定资源边界
+
+下列 hard maximum 不能通过配置提高或关闭：
+
+| 资源 | Hard maximum |
+|---|---:|
+| Native RPC envelope | 64 MiB |
+| 请求体 | 32 MiB |
+| JSON 深度 | 128 |
+| 外层与编码 JSON 累计 value 数 | 250,000 |
+| scanner/walker 保守统计的结构保留量 | 128 MiB |
+| 单个解码字符串或 replacement | 8 MiB |
+| Replacement 数 | 100,000 |
+| 编码后 replacement 输出 | 32 MiB |
+| 累计 detector 文本 | 32 MiB |
+| Detector 文本节点 | 100,000 |
+| Finding 数 | 4,096 |
+| 并发 native scan | 4 |
+| Native admission 等待 | 100 ms |
+| Native 检查 deadline | 10 秒 |
+
+受支持工具输入/输出中的 JSON 容器，无论位于标量、typed/list 文本还是原生结构化数据的字符串字段中，都会被递归检查。编码 JSON 和递归编码 JSON 与外层请求共享 JSON node、结构、detector、finding 和 replacement 预算；另外最多递归四层编码容器。Native 工作保持同步，返回请求后不会遗留 scanner goroutine。C ABI 无法传递客户端 cancellation，因此使用内部 deadline，并在有界扫描操作之间检查取消；正在执行的单次 Go 正则表达式操作无法被强制中断。
+
+配置可以降低、但不能提高这些 hard maximum。Payload scan/replacement 限制为零时使用对应的有界默认值；detector 限制必须为正数。
 
 ## 环境要求
 
-- 支持原生插件 RPC schema 2 的 CLIProxyAPI；已验证版本为 v7.2.157。
-- 从源码构建需要 Go 1.26+ 和 CGO。
+- 支持 native plugin ABI 1 的官方 CLIProxyAPI build。完整 fail-closed 行为要求宿主 RPC schema 不低于 2；插件会协商 schema 2。在 schema-1 宿主上，配置 `on_error: block` 或任意 `block_rule_ids` 都会导致注册失败。
+- 插件使用 CLIProxyAPI SDK v7.2.157 编译。Release 必须在 manifest 中记录隔离集成 gate 使用的官方 Host image 和精确 digest，否则不得发布。
+- 从源码构建需要 Go 1.26 和 CGO。
 - 对应目标平台的原生 C 工具链。
 
-原生 C ABI 仍为版本 1。插件会与新版宿主协商 RPC schema 2，因为默认策略依赖主动终止和 `request.complete`。
+## 安装
 
-## 构建
-
-```bash
-git clone https://github.com/ahoo/cpa-plugin-privacyfilter.git
-cd cpa-plugin-privacyfilter
-git checkout feat/protocol-aware-privacy-filter
-
-make build
-```
-
-默认在仓库根目录生成一个共享库：
-
-- Linux/FreeBSD：`privacyfilter.so`
-- macOS：`privacyfilter.dylib`
-- Windows：`privacyfilter.dll`
-
-可指定输出目录和版本：
+把同一个不可变 Release 的全部 asset 下载到新目录，校验完整的九项 checksum 后，再解压目标 archive 中唯一的规范根目录库文件：
 
 ```bash
-BUILD_DIR=dist VERSION=0.3.0-dev make build
+sha256sum -c checksums.txt
+unzip privacyfilter_0.3.0_linux_amd64.zip
 ```
 
-CGO 跨平台构建需要对应的交叉编译器。GitHub Workflow 会构建 Linux amd64/arm64、macOS amd64/arm64、Windows amd64/arm64 和 FreeBSD amd64 共七种产物。
+Archive 恰好包含一个 `privacyfilter.so`（macOS 为 `.dylib`，Windows 为 `.dll`），mode 为 `0755`，ZIP 时间戳固定。Release 还包含 `release-manifest.json`、`NOTICE`、`LICENSE` 和 `THIRD_PARTY_LICENSES.md`。
 
-## CLIProxyAPI 配置
+只把校验过的库放入宿主 native plugin discovery 目录。不要复制本地开发 build 或历史遗留且被忽略的 `dist/privacyfilter.so`。Linux 上 Go shared library 使用 `DF_1_NODELETE` 加载，因此加载、替换或移除插件后都必须重启 CLIProxyAPI 进程。
 
-把共享库放到 CLIProxyAPI 能发现原生插件的位置，然后在 `config.yaml` 中启用。Gitleaks 规则已嵌入二进制，sidecar 规则文件不是必需项。
-
-最小保护配置：
+宿主的全局 plugin subsystem 必须已启用，并且该库必须处于 effective enabled 状态。已发现但没有 config stanza 的库是否自动启用取决于宿主版本；应检查经过字段白名单投影后的 management 状态，不能假设发现即执行。本 Release gate 使用的官方 v7.3.3 精确镜像会发现但禁用未配置的库，因此该版本要求显式启用。最小宿主 stanza 为：
 
 ```yaml
 plugins:
@@ -103,131 +128,131 @@ plugins:
   configs:
     privacyfilter:
       enabled: true
-      priority: -1000
-      mode: redact
-      on_error: block
 ```
 
-`enabled` 和 `priority` 属于宿主字段。CLIProxyAPI v7.2.157 仍会把它们包含在传给原生插件的 YAML 中，因此插件会接受但不使用，实际语义由宿主执行。`-1000` 这样的低优先级会让过滤器在每个请求拦截阶段靠后运行，从而在 provider egress 前检查其他插件已经完成的请求修改。
+不配置插件自有选项时，privacyfilter 默认使用 `mode: redact`、`on_error: block`、内嵌规则、空 block/skip 列表和下方有界限制。`enabled` 和 `priority` 是宿主字段；其宿主默认 priority 为 `0`。运维可以调整 priority 或插件选项，但必须根据所有 request interceptor 验证实际顺序；每个 interceptor 阶段中，priority 越低越晚执行。
 
-完整配置示例：
+## 配置说明
+
+完整的插件自有配置示例：
 
 ```yaml
-plugins:
-  enabled: true
-  dir: "plugins"
-  configs:
-    privacyfilter:
-      enabled: true
-      priority: -1000
+mode: redact                    # redact | audit
+on_error: block                 # block | passthrough
 
-      mode: redact                 # redact | audit
-      on_error: block              # block | passthrough
+gitleaks_toml: ""              # 为空时始终使用 pinned 内嵌规则
+# gitleaks_mode: extend         # extend | replace；需要 gitleaks_toml
+allow_unsupported_rules: false
+block_rule_ids: []
 
-      gitleaks_toml: ""            # 为空：优先 sidecar，否则使用内嵌规则
-      # gitleaks_mode: extend      # extend | replace；设置后必须有 gitleaks_toml
-      allow_unsupported_rules: false
-      block_rule_ids:
-        - alibaba-access-key-id
+replacements:
+  email: "[EMAIL]"
+  phone: "[PHONE]"
+  id_card: "[ID_CARD]"
+  bank_card: "[BANK_CARD]"
+  ip: "[IP_ADDRESS]"
+  secret: "[SECRET]"
 
-      replacements:
-        email: "[EMAIL]"
-        phone: "[PHONE]"
-        id_card: "[ID_CARD]"
-        bank_card: "[BANK_CARD]"
-        ip: "[IP_ADDRESS]"
-        secret: "[SECRET]"
+skip_models: []                 # 显式 break-glass 绕过
+skip_formats: []
 
-      skip_models: []              # 显式 break-glass 绕过项
-      skip_formats: []
-
-      limits:
-        max_body_bytes: 33554432
-        max_depth: 256
-        max_json_nodes: 1000000
-        max_string_bytes: 8388608
-        max_replacements: 100000
-        max_replacement_bytes: 33554432
-        max_text_bytes: 33554432
-        max_text_nodes: 100000
-        max_findings: 4096
+limits:
+  max_body_bytes: 33554432
+  max_depth: 128
+  max_json_nodes: 250000
+  max_structural_bytes: 134217728
+  max_string_bytes: 8388608
+  max_replacements: 100000
+  max_replacement_bytes: 33554432
+  max_text_bytes: 33554432
+  max_text_nodes: 100000
+  max_findings: 4096
 ```
 
-配置使用严格 YAML 解析：未知字段、非法枚举值、重复的 blocking rule ID、不安全的替换字符串或多个 YAML document 都会导致插件注册失败。
-
-### 配置项说明
+配置使用严格 YAML 解码。未知字段、非法枚举值、重复 blocking rule ID、不安全 replacement、多份 YAML document，或超过 hard maximum 的限制都会导致注册失败。
 
 | 字段 | 默认值 | 说明 |
 |---|---:|---|
-| `mode` | `redact` | `redact` 会修改请求并执行 blocking rules；`audit` 只统计，不改写，也不执行基于规则的拒绝。检查错误仍遵循 `on_error`。 |
-| `on_error` | `block` | `block` 会主动终止格式错误、未知、不支持、有歧义、超预算或内部检查失败的请求；`passthrough` 是显式 fail-open 绕过。 |
-| `gitleaks_toml` | `""` | 自定义 TOML 路径；相对路径以插件目录为基准。为空时优先读取共享库旁的 `rules/gitleaks.toml`，不存在则使用内嵌版本。 |
-| `gitleaks_mode` | 未设置 | 有自定义文件时，未设置会保持 v0.2 兼容行为，即替换内嵌规则；也可显式设为 `extend` 或 `replace`。 |
-| `allow_unsupported_rules` | `false` | 默认拒绝自定义规则中的不支持语义；为 true 时跳过并在注册时报告。 |
-| `block_rule_ids` | `[]` | 在 redact 模式下，如果 finding 保留了列表中的 rule ID，则以 HTTP 422 拒绝请求。 |
-| `replacements` | 类型化默认值 | 可覆盖 `email`、`phone`、`id_card`、`bank_card`、`ip`、`secret`；空字符串表示删除该值。 |
-| `skip_models` | `[]` | 完全跳过检查的可信 break-glass 模型名，对 requested/effective model 均做大小写不敏感匹配。 |
-| `skip_formats` | `[]` | 完全跳过检查的可信 break-glass 来源格式。 |
-| `limits` | 如上例 | 请求级、不可关闭的正数工作量与分配上限。 |
+| `mode` | `redact` | 脱敏 finding。`audit` 只统计，不改写，也不执行基于 rule 的拒绝；检查错误仍遵循 `on_error`。 |
+| `on_error` | `block` | 主动终止检查失败。`passthrough` 是显式 fail-open 绕过。 |
+| `gitleaks_toml` | `""` | 自定义 TOML 路径。为空时始终使用内嵌规则，绝不会读取相邻 sidecar。 |
+| `gitleaks_mode` | 未设置 | 指定自定义文件时，未设置保留旧版 replace 行为；也可显式设为 `extend` 或 `replace`。 |
+| `allow_unsupported_rules` | `false` | 拒绝自定义规则中的不支持语义；`true` 允许跳过并明确报告。 |
+| `block_rule_ids` | `[]` | Redact 模式下，命中这些精确 rule ID 时以 422 终止，而不是替换。 |
+| `replacements` | 类型化默认值 | 覆盖六种 placeholder；空字符串表示删除命中值。 |
+| `skip_models` / `skip_formats` | `[]` | 可信且显式的完整检查绕过。 |
+| `limits` | 如上 | 请求级上限。Payload 字段为零时使用有界默认值，detector 字段必须为正；所有值都不能超过对应 hard maximum。 |
 
-插件注册时会先扫描自定义 replacement。如果 replacement 本身会被识别为敏感信息，注册会失败，避免递归或误导性的脱敏结果。
-
-### 自定义规则
-
-```yaml
-gitleaks_toml: custom/gitleaks.toml
-gitleaks_mode: extend
-allow_unsupported_rules: false
-```
-
-`extend` 会先加载内嵌规则，再加载自定义规则；`replace` 只加载自定义文件。为兼容旧版，只设置 `gitleaks_toml` 而不设置 `gitleaks_mode` 时等价于 `replace`。
-
-检测引擎只实现适用于请求文本的 Gitleaks 语义。当前内嵌快照共有 222 条规则，其中 217 条加载成功，5 条仅依赖 path/path-only 的规则会被跳过，并在注册兼容性报告中明确显示。自定义规则只要包含不支持语义，就会默认注册失败；只有显式设置 `allow_unsupported_rules: true` 才允许跳过。
+内嵌快照是 Gitleaks v8.30.0 在 commit `6eaad039603a4de39fddd1cf5f727391efe9974e` 的精确默认配置，SHA-256 为 `e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf`。其中 222 条规则可见、217 条加载；4 条 path-constrained 规则和 1 条 path-only 规则被跳过；另有 4 项 path allowlist 条件因协议文本没有文件路径而被忽略。精确的九项兼容性报告或文件字节一旦变化，注册就会失败。可运行 `scripts/update-rules.sh --check` 验证本地快照；更新命令只获取该不可变 commit，并校验预期 digest。
 
 ## 失败处理
 
-默认配置下，插件会主动终止请求，并且不会把修改后的请求体交给 executor：
+默认 `on_error: block` 会返回主动终止响应；`on_error: passthrough` 会显式关闭检查错误终止：
 
 | 情况 | HTTP 状态码 |
 |---|---:|
 | 空请求体或外层 JSON 非法 | 400 |
-| 未知格式、非法/歧义结构、不支持的 block、编码工具参数 JSON 非法 | 422 |
-| 命中配置的 blocking rule | 422 |
-| 超过 body/node/depth/finding/replacement 等预算 | 413 |
-| 检测器或插件内部错误 | 503 |
+| 未知格式、不支持/有歧义的协议结构、编码工具 JSON 非法，或在 redact 模式命中配置的 blocking rule | 422 |
+| 超过 body/depth/node/string/structural/detector/finding/replacement 限制 | 413 |
+| Native admission 饱和、deadline、插件不可用/正在 quiesce、panic 或内部失败 | 503 |
 
-错误体会按 OpenAI、Anthropic 或 Gemini 对应协议返回。请求侧诊断信息刻意保持通用，防止命中内容通过错误响应泄漏；注册/重配置错误则会保留安全的配置与规则诊断，方便运维修正启动问题。
+错误体使用对应协议的通用 envelope，不包含命中的请求值。
 
-## 重要信任边界与限制
+## 信任边界与限制
 
-本插件保护的是**支持范围内请求文本的 provider egress**，不是端到端 DLP 边界。
+本插件是有界的请求体 defense-in-depth 层，**不是绝对的最终 egress DLP 边界**。以下宿主顺序观察基于 SDK v7.2.157，并且必须在每个 Release manifest 所记录的精确 image 上重新验证：
 
-1. **CLIProxyAPI 会先看到原始请求。** HTTP middleware 和 ModelRouter 都早于原生插件的 `BeforeAuth` interceptor 执行。插件无法向宿主、路由器或更早执行的可信进程内插件隐藏输入。
-2. **CLIProxyAPI v7.2.157 可能把被拒绝请求的原始 body 留在本地强制错误日志中。** 宿主在插件执行前就捕获了下游请求体，而且即便 `request-log: false`，非 2xx 响应仍会写 error log。原生 interceptor 无法改写这份已捕获副本。必须保护宿主和日志目录；如果本地落盘脱敏是硬性要求，应在入口前先清洗，或给 CLIProxyAPI 增加 pre-log redaction hook。
-3. **不处理响应。** 模型响应 JSON、SSE/流式输出，以及从上游返回的工具输出不在当前里程碑内。
-4. **不解析二进制和引用内容。** 图片、音频、视频、PDF/Office、inline/base64 数据以及远程文件 URL 没有 OCR 或文档提取能力，会保持不变。
-5. **不扫描工具定义。** 工具/函数的实际参数和结果已覆盖；schema/control 字段和描述不会被改写。
-6. **检测是启发式的。** regex/entropy 检测无法保证找出所有密钥，也无法保证零误报。应谨慎选择 blocking rules，并用代表性流量验证后再用于生产。
-7. `skip_models`、`skip_formats`、`on_error: passthrough` 和 `mode: audit` 都是显式安全绕过项，适用时会记录相应告警或模式信息。
+1. CLIProxyAPI 的入口 middleware 和 router 会在 request interceptor 之前看到原始请求；更早执行的可信进程内插件也可以看到它。
+2. 官方宿主可能在插件处理前，把被拒绝请求的原始 body 持久化到本地 forced-error log。应保护宿主和日志访问；如果本地落盘脱敏是硬性要求，应使用 pre-ingress scrubber 或宿主 pre-log hook。
+3. 部分宿主 translation/normalization 发生在 request interceptor 之后。本插件只覆盖 interceptor 阶段识别到的 body，不覆盖后续 translator 新生成的文本。真正的最终 egress 保证需要宿主提供 post-translation hook，或使用独立 egress proxy。
+4. 不处理模型响应、SSE/流式输出和响应侧工具输出。
+5. 不解码二进制和引用内容：图片、音频、视频、PDF/Office、inline/base64 数据及远程文件不会经过 OCR 或文档提取。
+6. 协议分类表是 pinned 的。新增含字符串字段在完成审查和支持前可能返回 422。
+7. 检测仍是启发式的。精确凭证字段有意避免宽泛子串匹配；通用 detector 仍可能误报或漏报。
+8. `skip_models`、`skip_formats`、`on_error: passthrough` 和 `mode: audit` 都是显式安全绕过。
 
-## 开发与验证
+## 构建与验证
+
+本地 native build 仅用于 staging：
 
 ```bash
-go test ./...
-go test -race ./...
-go vet ./...
-go test ./payload -run='^$' -fuzz='^FuzzScanNoPanic$' -fuzztime=30s
-go test ./internal/privacyengine -run='^$' -fuzz='^FuzzNoPanic$' -fuzztime=30s
-go test -bench=BenchmarkSanitizeRequestSizes -benchmem .
+git clone https://github.com/ahoo/cpa-plugin-privacyfilter.git
+cd cpa-plugin-privacyfilter
+make build
+# dist/staging/<goos>-<goarch>/privacyfilter.<extension>
 ```
 
-v0.3 分支还使用 glibc Linux/amd64 构建，在隔离的 CLIProxyAPI v7.2.157 和合成 mock upstream 上对五种规范协议做黑盒验证；无需接触生产代理。
+Build 使用 `GOFLAGS=-mod=readonly`，并嵌入 VCS metadata、版本和源码 revision。Linux Release job 使用 `.github/workflows/build.yml` 中 pinned 的 Debian Bookworm image，不会发布源码树中的开发 ELF。
+
+常用源码 gate：
+
+```bash
+gofmt -w $(git ls-files '*.go')
+go mod verify
+GOFLAGS='' go mod tidy -diff
+go vet ./...
+go vet ./.github/scripts
+go test ./...
+go test ./.github/scripts
+go test -race ./...
+go test ./... -count=2
+python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+./scripts/test-native-abi.sh
+./scripts/update-rules.sh --check
+./.github/scripts/generate-license-report.py --check
+go test ./payload -run='^$' -fuzz='^FuzzScanNoPanic$' -fuzztime=15s
+go test ./internal/privacyengine -run='^$' -fuzz='^FuzzNoPanic$' -fuzztime=15s
+```
+
+Release workflow 只发布五个平台：Linux amd64/arm64、Darwin amd64/arm64 和 Windows amd64。Workflow 使用 pinned Actions，拒绝覆盖已存在的 Release，不使用 `--clobber`，并在发布前校验 tag/version/main 完全一致。
 
 ## 来源与许可证
 
-- 原始插件：[rheodev/cpa-plugin-privacyfilter](https://github.com/rheodev/cpa-plugin-privacyfilter)
-- 协议安全 JSON scanner 改编自 [ToS0/cpa-plugin-privacyfilter](https://github.com/ToS0/cpa-plugin-privacyfilter)
-- PII 和密钥检测派生自 [packyme/privacy-filter](https://github.com/packyme/privacy-filter) commit `64b8de3c2060`，已在仓库内内置并按其 MIT 许可证进行加固
-- 插件运行时：[router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+- 原始插件及历史：[rheodev/cpa-plugin-privacyfilter](https://github.com/rheodev/cpa-plugin-privacyfilter)
+- 加固分支：[ahoo/cpa-plugin-privacyfilter](https://github.com/ahoo/cpa-plugin-privacyfilter)
+- 协议安全 scanner 改编：[ToS0/cpa-plugin-privacyfilter](https://github.com/ToS0/cpa-plugin-privacyfilter)
+- Detector 来源：[PackyMe/privacy-filter](https://github.com/PackyMe/privacy-filter)
+- 内嵌规则：[Gitleaks](https://github.com/gitleaks/gitleaks)
+- Plugin SDK：[CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 
-本仓库使用 MIT 许可证，详见 [LICENSE](LICENSE) 和 [internal/privacyengine/LICENSE](internal/privacyengine/LICENSE)。运行时不依赖 `packyme/privacy-filter`。
+本仓库使用 MIT 许可证。精确 provenance、版权、源码 commit 和链接依赖许可证见 [LICENSE](LICENSE)、[NOTICE](NOTICE) 和 [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)。

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -22,6 +24,7 @@ func resetABIStateForTest(t *testing.T) {
 		runtime.cache.Clear()
 	}
 	t.Cleanup(func() {
+		privacyFilterABIState.nativeInFlight.Wait()
 		privacyFilterABIState.inFlight.Wait()
 		privacyFilterABIState.Lock()
 		runtime := privacyFilterABIState.runtime
@@ -60,7 +63,7 @@ func registerWithConfigForTest(t *testing.T, hostSchema uint32, config []byte) a
 		t.Fatalf("decode envelope: %v", err)
 	}
 	if !env.OK {
-		t.Fatalf("registration envelope not OK: %s", raw)
+		t.Fatalf("registration envelope not OK: response_len=%d", len(raw))
 	}
 	var reg abiRegistration
 	if err := json.Unmarshal(env.Result, &reg); err != nil {
@@ -86,6 +89,83 @@ func TestNegotiateSchemaVersion(t *testing.T) {
 				t.Fatalf("negotiateSchemaVersion(%d) = %d, want %d", tc.host, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNativeScanLimitsAreFixed(t *testing.T) {
+	if nativeScanConcurrency != 4 {
+		t.Fatalf("native scan concurrency = %d, want 4", nativeScanConcurrency)
+	}
+	if nativeScanAdmissionWait <= 0 || nativeScanAdmissionWait > 100*time.Millisecond {
+		t.Fatalf("native admission wait = %s, want (0, 100ms]", nativeScanAdmissionWait)
+	}
+	if nativeScanDeadline != 10*time.Second {
+		t.Fatalf("native scan deadline = %s, want 10s", nativeScanDeadline)
+	}
+}
+
+func TestNativeScanAdmissionCapsConcurrencyAndReleases(t *testing.T) {
+	if got := len(nativeScanSlots); got != 0 {
+		t.Fatalf("native scan slots occupied before test: %d", got)
+	}
+	releases := make([]func(), 0, nativeScanConcurrency)
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	for index := 0; index < nativeScanConcurrency; index++ {
+		release, err := acquireNativeScan(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("acquire slot %d: %v", index, err)
+		}
+		releases = append(releases, release)
+	}
+	if _, err := acquireNativeScan(context.Background(), 0); !errors.Is(err, errNativeScanAdmission) {
+		t.Fatalf("fifth scan admission error = %v, want %v", err, errNativeScanAdmission)
+	}
+
+	releases[0]()
+	releases = releases[1:]
+	replacementRelease, err := acquireNativeScan(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("acquire released slot: %v", err)
+	}
+	releases = append(releases, replacementRelease)
+	for _, release := range releases {
+		release()
+	}
+	releases = nil
+	if got := len(nativeScanSlots); got != 0 {
+		t.Fatalf("native scan slots occupied after release: %d", got)
+	}
+}
+
+func TestNativeScanAdmissionHonorsWaitAndContext(t *testing.T) {
+	if got := len(nativeScanSlots); got != 0 {
+		t.Fatalf("native scan slots occupied before test: %d", got)
+	}
+	releases := make([]func(), 0, nativeScanConcurrency)
+	for index := 0; index < nativeScanConcurrency; index++ {
+		release, err := acquireNativeScan(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("acquire slot %d: %v", index, err)
+		}
+		releases = append(releases, release)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+
+	if _, err := acquireNativeScan(context.Background(), 5*time.Millisecond); !errors.Is(err, errNativeScanAdmission) {
+		t.Fatalf("timed admission error = %v, want %v", err, errNativeScanAdmission)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := acquireNativeScan(ctx, time.Second); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled admission error = %v, want context canceled", err)
 	}
 }
 
@@ -154,7 +234,7 @@ func TestRequestCompleteDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !env.OK {
-		t.Fatalf("request.complete envelope not OK: %s", raw)
+		t.Fatalf("request.complete envelope not OK: response_len=%d", len(raw))
 	}
 }
 
@@ -188,6 +268,51 @@ func TestRequestCompleteRemainsAvailableWhileQuiesced(t *testing.T) {
 	}
 }
 
+func TestQuiesceWaitsForAdmittedNativeScan(t *testing.T) {
+	resetABIStateForTest(t)
+	registerForTest(t, 2)
+	done, err := beginNativeScanCall()
+	if err != nil {
+		t.Fatalf("begin native scan: %v", err)
+	}
+
+	quiesced := make(chan error, 1)
+	go func() {
+		_, quiesceErr := handlePrivacyFilterQuiesce()
+		quiesced <- quiesceErr
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		privacyFilterABIState.RLock()
+		shuttingDown := privacyFilterABIState.shuttingDown
+		privacyFilterABIState.RUnlock()
+		if shuttingDown {
+			break
+		}
+		if time.Now().After(deadline) {
+			done()
+			t.Fatal("quiesce did not enter shutting-down state")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-quiesced:
+		done()
+		t.Fatalf("quiesce returned before native scan release: %v", err)
+	default:
+	}
+
+	done()
+	select {
+	case err := <-quiesced:
+		if err != nil {
+			t.Fatalf("quiesce: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("quiesce did not return after native scan release")
+	}
+}
+
 func TestQuiesceStopsNewCallsUntilRegister(t *testing.T) {
 	resetABIStateForTest(t)
 	registerForTest(t, 2)
@@ -217,14 +342,14 @@ func TestABIPanicEnvelopeFailsClosedForRequestInterceptors(t *testing.T) {
 			t.Fatal(err)
 		}
 		if !env.OK {
-			t.Fatalf("panic envelope is not an OK response: %s", raw)
+			t.Fatalf("panic envelope is not an OK response: response_len=%d", len(raw))
 		}
 		var resp pluginapi.RequestInterceptResponse
 		if err := json.Unmarshal(env.Result, &resp); err != nil {
 			t.Fatal(err)
 		}
 		if !resp.Terminate || resp.StatusCode != 503 {
-			t.Fatalf("panic response = %+v, want terminate 503", resp)
+			t.Fatalf("panic response terminate=%t status=%d body_len=%d, want terminate 503", resp.Terminate, resp.StatusCode, len(resp.ResponseBody))
 		}
 		if got := resp.ResponseHeaders.Get("Content-Type"); got != "application/json" {
 			t.Fatalf("Content-Type = %q", got)
@@ -244,17 +369,17 @@ func TestABIFailureEnvelopeTerminatesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !env.OK {
-		t.Fatalf("failure envelope is not an OK response: %s", raw)
+		t.Fatalf("failure envelope is not an OK response: response_len=%d", len(raw))
 	}
 	var resp pluginapi.RequestInterceptResponse
 	if err := json.Unmarshal(env.Result, &resp); err != nil {
 		t.Fatal(err)
 	}
 	if !resp.Terminate || resp.StatusCode != 413 {
-		t.Fatalf("response = %+v, want terminate 413", resp)
+		t.Fatalf("response terminate=%t status=%d body_len=%d, want terminate 413", resp.Terminate, resp.StatusCode, len(resp.ResponseBody))
 	}
 	if got := string(resp.ResponseBody); got == "" || !json.Valid(resp.ResponseBody) {
-		t.Fatalf("response body is not valid JSON: %q", got)
+		t.Fatalf("response body is not valid JSON: body_len=%d", len(got))
 	}
 }
 
@@ -265,7 +390,7 @@ func TestABIFailureEnvelopeUsesPluginErrorOutsideRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if env.OK || env.Error == nil || env.Error.Code != "plugin_error" {
-		t.Fatalf("unexpected envelope: %s", raw)
+		t.Fatalf("unexpected envelope: ok=%t has_error=%t response_len=%d", env.OK, env.Error != nil, len(raw))
 	}
 }
 

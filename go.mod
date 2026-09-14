@@ -1,4 +1,4 @@
-module github.com/rheodev/cpa-plugin-privacyfilter
+module github.com/ahoo/cpa-plugin-privacyfilter
 
 go 1.26.0
 

@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
 )
 
 func FuzzScanNoPanic(f *testing.F) {
@@ -35,7 +35,7 @@ func FuzzScanNoPanic(f *testing.F) {
 			return
 		}
 		if !json.Valid(body) {
-			t.Fatalf("scanner accepted bytes encoding/json rejects: %q", body)
+			t.Fatalf("scanner accepted bytes encoding/json rejects: input_len=%d", len(body))
 		}
 
 		tokens := doc.Strings()
@@ -58,7 +58,7 @@ func FuzzScanNoPanic(f *testing.F) {
 			return
 		}
 		if !json.Valid(out) {
-			t.Fatalf("replacement produced invalid JSON: %q", out)
+			t.Fatalf("replacement produced invalid JSON: output_len=%d", len(out))
 		}
 		if !changed {
 			if !bytes.Equal(out, body) || !sameBacking(out, body) {

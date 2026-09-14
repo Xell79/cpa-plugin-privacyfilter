@@ -7,7 +7,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-var pluginVersion = "0.3.0-dev"
+var (
+	pluginVersion  = "0.3.0"
+	pluginRevision = "unknown"
+)
 
 const (
 	defaultRequestCacheTTL        = 10 * time.Minute

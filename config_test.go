@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/internal/privacyengine"
+	"github.com/ahoo/cpa-plugin-privacyfilter/internal/privacyengine"
 )
 
 func TestParseConfigDefaultsAreProtective(t *testing.T) {
@@ -17,18 +17,19 @@ func TestParseConfigDefaultsAreProtective(t *testing.T) {
 	if cfg.Mode != modeRedact || cfg.OnError != onErrorBlock {
 		t.Fatalf("defaults = mode %q on_error %q", cfg.Mode, cfg.OnError)
 	}
-	if cfg.Limits.MaxBodyBytes <= 0 || cfg.Limits.MaxTextBytes <= 0 || cfg.Limits.MaxFindings <= 0 {
+	if cfg.Limits.MaxBodyBytes <= 0 || cfg.Limits.MaxStructuralBytes <= 0 ||
+		cfg.Limits.MaxTextBytes <= 0 || cfg.Limits.MaxFindings <= 0 {
 		t.Fatalf("limits are not bounded: %+v", cfg.Limits)
 	}
 }
 
 func TestParseConfigRejectsUnknownFieldAndMultipleDocuments(t *testing.T) {
-	for _, raw := range []string{
+	for index, raw := range []string{
 		"typo_field: true\n",
 		"mode: redact\n---\nmode: audit\n",
 	} {
 		if _, err := parseConfig([]byte(raw)); err == nil {
-			t.Fatalf("parseConfig(%q) succeeded", raw)
+			t.Fatalf("parseConfig fixture %d of length %d succeeded", index, len(raw))
 		}
 	}
 }
@@ -64,11 +65,33 @@ func TestParseConfigValidatesModesRulesReplacementsAndLimits(t *testing.T) {
 		"block_rule_ids: [x, x]\n",
 		"limits:\n  max_text_bytes: 0\n",
 		"limits:\n  max_body_bytes: -1\n",
+		"limits:\n  max_structural_bytes: -1\n",
+		"limits:\n  max_structural_bytes: 134217729\n",
+		"limits:\n  max_string_bytes: 8388609\n",
+		"limits:\n  max_replacements: 100001\n",
+		"limits:\n  max_replacement_bytes: 33554433\n",
+		"limits:\n  max_text_bytes: 33554433\n",
+		"limits:\n  max_text_nodes: 100001\n",
+		"limits:\n  max_findings: 4097\n",
 	}
-	for _, raw := range invalid {
+	for index, raw := range invalid {
 		if _, err := parseConfig([]byte(raw)); err == nil {
-			t.Errorf("parseConfig accepted invalid config:\n%s", raw)
+			t.Errorf("parseConfig accepted invalid config index=%d bytes=%d", index, len(raw))
 		}
+	}
+}
+
+func TestParseConfigAllowsLowerStructuralRetentionLimit(t *testing.T) {
+	cfg, err := parseConfig([]byte("limits:\n  max_structural_bytes: 4096\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits, err := cfg.payloadLimits().Normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if limits.MaxStructuralBytes != 4096 {
+		t.Fatalf("structural limit = %d, want 4096", limits.MaxStructuralBytes)
 	}
 }
 
@@ -97,22 +120,29 @@ func TestBuildPluginRejectsSensitiveReplacement(t *testing.T) {
 	}
 }
 
-func TestConventionalSidecarUsesReportedCompatibility(t *testing.T) {
+func TestEmptyRulePathIgnoresConventionalSidecar(t *testing.T) {
 	dir := t.TempDir()
 	rulesDir := filepath.Join(dir, "rules")
 	if err := os.MkdirAll(rulesDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(rulesDir, "gitleaks.toml"), embeddedGitleaks, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(rulesDir, "gitleaks.toml"), []byte("not valid TOML = ["), 0o600); err != nil {
 		t.Fatal(err)
+	}
+	material, err := defaultConfig().loadRuleMaterial(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if material.source != "embedded" || len(material.embedded) == 0 || len(material.custom) != 0 {
+		t.Fatalf("empty rule path selected unexpected material: source=%q embedded=%t custom=%t", material.source, len(material.embedded) != 0, len(material.custom) != 0)
 	}
 	engine, report, err := newEngine(dir, defaultConfig())
 	if err != nil {
-		t.Fatalf("newEngine(sidecar): %v (report=%+v)", err, report)
+		t.Fatalf("newEngine(embedded): %v (report=%+v)", err, report)
 	}
 	loaded, skipped := engine.Stats()
 	if loaded != 217 || skipped != 5 {
-		t.Fatalf("sidecar stats = %d/%d; report=%+v", loaded, skipped, report)
+		t.Fatalf("embedded stats = %d/%d; report=%+v", loaded, skipped, report)
 	}
 }
 

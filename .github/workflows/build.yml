@@ -3,37 +3,249 @@ name: Build
 on:
   pull_request:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
+  GOFLAGS: -mod=readonly
   PLUGIN_ID: privacyfilter
+  LINUX_BUILDER_IMAGE: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
 
 jobs:
   test:
-    name: Test
+    name: Source, security, and ABI gates
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Test with race detector
-        run: go test -race ./...
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
 
-      - name: Vet
-        run: go vet ./...
+      - name: Verify source identity, formatting, modules, rules, and notices
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+          git diff --check
+          go mod verify
+          GOFLAGS='' go mod tidy -diff
+          ./scripts/update-rules.sh --check
+          ./.github/scripts/generate-license-report.py --check
+          python3 - <<'PY'
+          import hashlib
+          import re
+          from pathlib import Path
 
-  build:
+          go_mod = Path("go.mod").read_text(encoding="utf-8")
+          if not go_mod.startswith("module github.com/ahoo/cpa-plugin-privacyfilter\n"):
+              raise SystemExit("module identity mismatch")
+          source = Path("main.go").read_text(encoding="utf-8")
+          match = re.search(r'^\s*pluginVersion\s*=\s*"([^"]+)"$', source, re.MULTILINE)
+          if not match or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-dev)?", match.group(1)):
+              raise SystemExit("source pluginVersion must be major.minor.patch or a development version")
+          expected_notices = {
+              "LICENSE": ("Copyright (c) 2026 Frank", "Copyright (c) 2026 ahoo"),
+              "NOTICE": (
+                  "64b8de3c206059b187d65381189b70c267550392",
+                  "c2b9f3a5f662f6f378007c3389af4385d1c89bc5",
+                  "4947e0d9f2641493bf462c9d3bf44b8559bfb627",
+                  "09a29bd345bc44c473abe7fd07859e32df2ea543",
+                  "6eaad039603a4de39fddd1cf5f727391efe9974e",
+                  "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf",
+              ),
+          }
+          for path, needles in expected_notices.items():
+              text = Path(path).read_text(encoding="utf-8")
+              for needle in needles:
+                  if needle not in text:
+                      raise SystemExit(f"missing provenance marker in {path}")
+          rules = Path("rules/gitleaks.toml").read_bytes()
+          if hashlib.sha256(rules).hexdigest() != "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf":
+              raise SystemExit("embedded rule digest mismatch")
+          PY
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            SOURCE_VERSION="$(python3 -c 'import re; print(re.search(r"pluginVersion\s*=\s*\"([^\"]+)\"", open("main.go").read()).group(1))')"
+            test "${GITHUB_REF_NAME}" = "v${SOURCE_VERSION}"
+            test "$(git rev-list -n 1 "${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+            git fetch --no-tags origin main:refs/remotes/origin/main
+            test "$(git rev-parse origin/main)" = "${GITHUB_SHA}"
+          fi
+
+      - name: Vet and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go vet ./.github/scripts
+          go test ./...
+          go test ./.github/scripts
+          go test -race ./...
+          go test ./... -count=2
+          python3 -m unittest discover -s .github/scripts -p 'test_*.py'
+          ./scripts/test-native-abi.sh
+
+      - name: Run bounded fuzz regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./payload -run='^$' -fuzz='^FuzzScanNoPanic$' -fuzztime=15s
+          go test ./internal/privacyengine -run='^$' -fuzz='^FuzzNoPanic$' -fuzztime=15s
+
+  build-linux:
+    name: Build linux/${{ matrix.goarch }}
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goarch: amd64
+            runner: ubuntu-24.04
+          - goarch: arm64
+            runner: ubuntu-24.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install pinned-image build prerequisites
+        run: |
+          set -euo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates git python3
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve build metadata
+        run: |
+          set -euo pipefail
+          SOURCE_VERSION="$(python3 -c 'import re; print(re.search(r"pluginVersion\s*=\s*\"([^\"]+)\"", open("main.go").read()).group(1))')"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            test "${VERSION}" = "${SOURCE_VERSION}"
+          elif [[ "${SOURCE_VERSION}" == *-dev ]]; then
+            VERSION="${SOURCE_VERSION}.${GITHUB_SHA:0:12}"
+          else
+            VERSION="${SOURCE_VERSION}-dev.${GITHUB_SHA:0:12}"
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_linux_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
+          echo "DIST_DIR=${RUNNER_TEMP}/privacyfilter-linux-${{ matrix.goarch }}" >> "${GITHUB_ENV}"
+
+      - name: Build from protected source and verify unchanged
+        run: |
+          set -euo pipefail
+          mkdir -p "${DIST_DIR}"
+          git ls-files -z | xargs -0 chmod a-w
+          CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.goarch }} \
+            go build -trimpath -buildvcs=true -buildmode=c-shared \
+              -ldflags "-s -w -X main.pluginVersion=${VERSION} -X main.pluginRevision=${GITHUB_SHA}" \
+              -o "${DIST_DIR}/${PLUGIN_ID}.so" .
+          go version -m "${DIST_DIR}/${PLUGIN_ID}.so" | grep -F "vcs.revision=${GITHUB_SHA}" >/dev/null
+          go version -m "${DIST_DIR}/${PLUGIN_ID}.so" | grep -F 'vcs.modified=false' >/dev/null
+          readelf -d "${DIST_DIR}/${PLUGIN_ID}.so" | grep -F 'Shared library: [libc.so.6]' >/dev/null
+          test -z "$(git status --short --untracked-files=all)"
+
+      - name: Verify exact Linux artifact ABI and registration
+        run: |
+          set -euo pipefail
+          cc -std=c11 -Wall -Wextra -Werror -Wno-unused-function \
+            -I"${DIST_DIR}" scripts/native-abi-harness.c -ldl \
+            -o "${DIST_DIR}/native-abi-harness"
+          "${DIST_DIR}/native-abi-harness" "${DIST_DIR}/${PLUGIN_ID}.so" "${VERSION}"
+          python3 .github/scripts/verify-registration.py \
+            --library "${DIST_DIR}/${PLUGIN_ID}.so" --version "${VERSION}"
+          rm -f "${DIST_DIR}/${PLUGIN_ID}.h" "${DIST_DIR}/native-abi-harness"
+
+      - name: Record official Host candidate identity
+        if: matrix.goarch == 'amd64'
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${VERSION}" > "${DIST_DIR}/candidate-version.txt"
+          printf '%s\n' "${GITHUB_SHA}" > "${DIST_DIR}/candidate-revision.txt"
+          sha256sum "${DIST_DIR}/${PLUGIN_ID}.so" | cut -d' ' -f1 \
+            > "${DIST_DIR}/candidate-sha256.txt"
+
+      - name: Upload official Host candidate
+        if: matrix.goarch == 'amd64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: official-host-candidate-linux-amd64
+          path: |
+            ${{ env.DIST_DIR }}/${{ env.PLUGIN_ID }}.so
+            ${{ env.DIST_DIR }}/candidate-version.txt
+            ${{ env.DIST_DIR }}/candidate-revision.txt
+            ${{ env.DIST_DIR }}/candidate-sha256.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Package exact release target
+        run: |
+          set -euo pipefail
+          go run ./.github/scripts/package-release.go \
+            -library "${DIST_DIR}/${PLUGIN_ID}.so" \
+            -archive "${DIST_DIR}/${ARCHIVE_NAME}" \
+            -checksum "${DIST_DIR}/${ARCHIVE_NAME}.sha256"
+
+      - name: Record release provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/release-manifest.py build \
+            --version "${VERSION}" --revision "${GITHUB_SHA}" \
+            --goos linux --goarch '${{ matrix.goarch }}' --extension so \
+            --archive "${DIST_DIR}/${ARCHIVE_NAME}" \
+            --library "${DIST_DIR}/${PLUGIN_ID}.so" \
+            --go-version "$(go version)" \
+            --runner-image "${ImageOS:-unknown}:${ImageVersion:-unknown}" \
+            --builder-image "${LINUX_BUILDER_IMAGE}" \
+            --output "${DIST_DIR}/build-metadata_linux_${{ matrix.goarch }}.json"
+
+      - name: Upload release target
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-linux-${{ matrix.goarch }}
+          path: |
+            ${{ env.DIST_DIR }}/${{ env.ARCHIVE_NAME }}
+            ${{ env.DIST_DIR }}/${{ env.ARCHIVE_NAME }}.sha256
+            ${{ env.DIST_DIR }}/build-metadata_linux_${{ matrix.goarch }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  build-native:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
     runs-on: ${{ matrix.runner }}
@@ -41,208 +253,260 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: linux
-            goarch: amd64
-            runner: ubuntu-24.04
-            ext: so
-          - goos: linux
-            goarch: arm64
-            runner: ubuntu-24.04-arm
-            ext: so
           - goos: darwin
             goarch: amd64
             runner: macos-15-intel
-            ext: dylib
+            extension: dylib
           - goos: darwin
             goarch: arm64
             runner: macos-15
-            ext: dylib
+            extension: dylib
           - goos: windows
             goarch: amd64
             runner: windows-2025
-            ext: dll
+            extension: dll
     defaults:
       run:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Resolve release metadata
-        run: scripts/release-metadata.sh ${{ matrix.goos }} ${{ matrix.goarch }} ${{ matrix.ext }}
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
 
-      - name: Build shared library
+      - name: Verify Windows C toolchain
+        if: matrix.goos == 'windows'
+        shell: pwsh
+        run: |
+          $toolchain = 'C:\mingw64\bin'
+          if (-not (Test-Path (Join-Path $toolchain 'gcc.exe'))) {
+            throw 'preinstalled MinGW-w64 GCC is unavailable'
+          }
+          & (Join-Path $toolchain 'gcc.exe') --version | Select-Object -First 1
+          $toolchain | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Resolve build metadata
         run: |
           set -euo pipefail
-          mkdir -p dist
+          SOURCE_VERSION="$(python -c 'import re; print(re.search(r"pluginVersion\s*=\s*\"([^\"]+)\"", open("main.go").read()).group(1))')"
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            test "${VERSION}" = "${SOURCE_VERSION}"
+          elif [[ "${SOURCE_VERSION}" == *-dev ]]; then
+            VERSION="${SOURCE_VERSION}.${GITHUB_SHA:0:12}"
+          else
+            VERSION="${SOURCE_VERSION}-dev.${GITHUB_SHA:0:12}"
+          fi
+          DIST_ROOT="${RUNNER_TEMP}"
+          if [[ '${{ matrix.goos }}' == 'windows' ]]; then
+            DIST_ROOT="$(cygpath -u "${RUNNER_TEMP}")"
+          fi
+          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip" >> "${GITHUB_ENV}"
+          echo "DIST_DIR=${DIST_ROOT}/privacyfilter-${{ matrix.goos }}-${{ matrix.goarch }}" >> "${GITHUB_ENV}"
+
+      - name: Build from protected source and verify unchanged
+        run: |
+          set -euo pipefail
+          mkdir -p "${DIST_DIR}"
+          git ls-files -z | xargs -0 chmod a-w
           CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
-            go build -trimpath -buildmode=c-shared \
-              -ldflags "-s -w -X main.pluginVersion=${VERSION}" \
-              -o "dist/${LIB_NAME}" .
-          rm -f "dist/${PLUGIN_ID}.h"
+            go build -trimpath -buildvcs=true -buildmode=c-shared \
+              -ldflags "-s -w -X main.pluginVersion=${VERSION} -X main.pluginRevision=${GITHUB_SHA}" \
+              -o "${DIST_DIR}/${PLUGIN_ID}.${{ matrix.extension }}" .
+          go version -m "${DIST_DIR}/${PLUGIN_ID}.${{ matrix.extension }}" | grep -F "vcs.revision=${GITHUB_SHA}" >/dev/null
+          go version -m "${DIST_DIR}/${PLUGIN_ID}.${{ matrix.extension }}" | grep -F 'vcs.modified=false' >/dev/null
+          test -z "$(git status --short --untracked-files=all)"
 
-      - name: Verify Linux native ABI exports
-        if: matrix.goos == 'linux'
+      - name: Verify exact artifact registration
         run: |
           set -euo pipefail
-          nm -D "dist/${LIB_NAME}" > dist/native-symbols.txt
-          for symbol in cliproxy_plugin_init PrivacyFilterPluginCall PrivacyFilterPluginFree PrivacyFilterPluginShutdown; do
-            grep -Eq "[[:space:]]T[[:space:]]${symbol}$" dist/native-symbols.txt
-          done
-          rm -f dist/native-symbols.txt
+          python .github/scripts/verify-registration.py \
+            --library "${DIST_DIR}/${PLUGIN_ID}.${{ matrix.extension }}" --version "${VERSION}"
+          rm -f "${DIST_DIR}/${PLUGIN_ID}.h"
 
-      - name: Package plugin
-        run: scripts/package-plugin.sh dist "${LIB_NAME}" "${ARCHIVE_NAME}"
+      - name: Package exact release target
+        run: |
+          set -euo pipefail
+          go run ./.github/scripts/package-release.go \
+            -library "${DIST_DIR}/${PLUGIN_ID}.${{ matrix.extension }}" \
+            -archive "${DIST_DIR}/${ARCHIVE_NAME}" \
+            -checksum "${DIST_DIR}/${ARCHIVE_NAME}.sha256"
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - name: Record release provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          python .github/scripts/release-manifest.py build \
+            --version "${VERSION}" --revision "${GITHUB_SHA}" \
+            --goos '${{ matrix.goos }}' --goarch '${{ matrix.goarch }}' \
+            --extension '${{ matrix.extension }}' \
+            --archive "${DIST_DIR}/${ARCHIVE_NAME}" \
+            --library "${DIST_DIR}/${PLUGIN_ID}.${{ matrix.extension }}" \
+            --go-version "$(go version)" \
+            --runner-image "${ImageOS:-unknown}:${ImageVersion:-unknown}" \
+            --builder-image "github-hosted:${ImageOS:-unknown}:${ImageVersion:-unknown}" \
+            --output "${DIST_DIR}/build-metadata_${{ matrix.goos }}_${{ matrix.goarch }}.json"
+
+      - name: Upload release target
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ env.ARCHIVE_NAME }}
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+            ${{ runner.temp }}/privacyfilter-${{ matrix.goos }}-${{ matrix.goarch }}/${{ env.ARCHIVE_NAME }}
+            ${{ runner.temp }}/privacyfilter-${{ matrix.goos }}-${{ matrix.goarch }}/${{ env.ARCHIVE_NAME }}.sha256
+            ${{ runner.temp }}/privacyfilter-${{ matrix.goos }}-${{ matrix.goarch }}/build-metadata_${{ matrix.goos }}_${{ matrix.goarch }}.json
           if-no-files-found: error
+          retention-days: 7
 
-  build-windows-arm64:
-    name: Build windows/arm64
-    needs: test
+  official-host:
+    name: Exact official Host integration
+    needs: build-linux
     runs-on: ubuntu-24.04
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 15
+    permissions:
+      contents: read
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - name: Checkout exact source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Resolve release metadata
-        id: release_metadata
-        run: scripts/release-metadata.sh windows arm64
-
-      - name: Build Windows ARM64 shared library
-        timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        env:
-          GOFLAGS: -trimpath -buildmode=c-shared
+      - name: Download exact Linux amd64 candidate
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          dir: .
-          packages: .
-          targets: windows-arm64
-          out-dir: dist/windows-arm64
-          output: ${{ env.PLUGIN_ID }}.dll
-          flags: -ldflags=-s -w
-          x-flags: main.pluginVersion=${{ steps.release_metadata.outputs.version }}
+          name: official-host-candidate-linux-amd64
+          path: ${{ runner.temp }}/official-host-candidate
 
-      - name: Package plugin
-        run: scripts/package-plugin.sh dist/windows-arm64 "${PLUGIN_ID}.dll" "${ARCHIVE_NAME}"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARCHIVE_NAME }}
-          path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
-          if-no-files-found: error
-
-  build-freebsd:
-    name: Build freebsd/${{ matrix.goarch }}
-    needs: test
-    runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goarch: amd64
-    defaults:
-      run:
+      - name: Verify candidate identity and run isolated Host
         shell: bash
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install FreeBSD cross-build dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y clang lld wget
+          CANDIDATE_DIR="${RUNNER_TEMP}/official-host-candidate"
+          VERSION="$(tr -d '\r\n' < "${CANDIDATE_DIR}/candidate-version.txt")"
+          REVISION="$(tr -d '\r\n' < "${CANDIDATE_DIR}/candidate-revision.txt")"
+          EXPECTED_SHA256="$(tr -d '\r\n' < "${CANDIDATE_DIR}/candidate-sha256.txt")"
+          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev(\.[0-9a-f]{12})?)?$ ]]
+          [[ "${REVISION}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${EXPECTED_SHA256}" =~ ^[0-9a-f]{64}$ ]]
+          test "${REVISION}" = "${GITHUB_SHA}"
+          test "$(sha256sum "${CANDIDATE_DIR}/${PLUGIN_ID}.so" | cut -d' ' -f1)" = "${EXPECTED_SHA256}"
+          ./scripts/official-host/run.sh \
+            --library "${CANDIDATE_DIR}/${PLUGIN_ID}.so" \
+            --version "${VERSION}" \
+            --revision "${REVISION}" \
+            --output "${RUNNER_TEMP}/official-host-integration.json"
 
-      - name: Resolve release metadata
-        id: release_metadata
-        run: scripts/release-metadata.sh freebsd ${{ matrix.goarch }}
-
-      - name: Build FreeBSD shared library
-        timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
-        env:
-          GOFLAGS: -trimpath -buildmode=c-shared
+      - name: Upload sanitized Host report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          dir: .
-          packages: .
-          targets: freebsd-${{ matrix.goarch }}
-          out-dir: dist/freebsd-${{ matrix.goarch }}
-          output: ${{ env.PLUGIN_ID }}.so
-          flags: -ldflags=-s -w
-          x-flags: main.pluginVersion=${{ steps.release_metadata.outputs.version }}
-
-      - name: Package plugin
-        run: scripts/package-plugin.sh dist/freebsd-${{ matrix.goarch }} "${PLUGIN_ID}.so" "${ARCHIVE_NAME}"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.ARCHIVE_NAME }}
-          path: |
-            ${{ env.ARCHIVE_NAME }}
-            ${{ env.ARCHIVE_NAME }}.sha256
+          name: official-host-integration
+          path: ${{ runner.temp }}/official-host-integration.json
           if-no-files-found: error
+          retention-days: 7
 
   release:
-    name: Release
+    name: Publish immutable release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
-      - build
-      - build-windows-arm64
-      - build-freebsd
+      - build-linux
+      - build-native
+      - official-host
     runs-on: ubuntu-24.04
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
     steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
+      - name: Checkout tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+
+      - name: Download exact release targets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: release-*
           path: dist
           merge-multiple: true
 
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+      - name: Download exact official Host report
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: official-host-integration
+          path: integration
+
+      - name: Assemble and verify release bundle
+        shell: bash
         run: |
           set -euo pipefail
-          sort dist/*.sha256 > dist/checksums.txt
-          awk 'NF != 2 || $1 !~ /^[0-9a-fA-F]{64}$/ { print "invalid checksum line " NR ": " $0; bad=1 } END { exit bad }' dist/checksums.txt
+          [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          VERSION="${GITHUB_REF_NAME#v}"
+          test "$(git rev-list -n 1 "${GITHUB_REF_NAME}")" = "${GITHUB_SHA}"
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          test "$(git rev-parse origin/main)" = "${GITHUB_SHA}"
+          cp LICENSE NOTICE THIRD_PARTY_LICENSES.md dist/
+          for checksum in dist/*.sha256; do
+            (cd dist && sha256sum -c "$(basename "${checksum}")")
+          done
+          python3 .github/scripts/release-manifest.py assemble \
+            --version "${VERSION}" --revision "${GITHUB_SHA}" \
+            --input-dir dist \
+            --integration-report integration/official-host-integration.json \
+            --output dist/release-manifest.json
+          (
+            cd dist
+            sha256sum *.zip LICENSE NOTICE THIRD_PARTY_LICENSES.md release-manifest.json \
+              | LC_ALL=C sort -k2 > checksums.txt
+            test "$(wc -l < checksums.txt | tr -d '[:space:]')" = 9
+            sha256sum -c checksums.txt
+          )
+
+      - name: Publish without replacement
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
           if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt --clobber --repo "${GITHUB_REPOSITORY}"
-          else
-            gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/checksums.txt \
-              --repo "${GITHUB_REPOSITORY}" \
-              --verify-tag \
-              --title "${GITHUB_REF_NAME}" \
-              --notes "Automated release for ${GITHUB_REF_NAME}."
+            printf 'release %s already exists; refusing to replace assets\n' "${GITHUB_REF_NAME}" >&2
+            exit 1
           fi
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/privacyfilter_*.zip \
+            dist/checksums.txt \
+            dist/release-manifest.json \
+            dist/LICENSE \
+            dist/NOTICE \
+            dist/THIRD_PARTY_LICENSES.md \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Immutable privacyfilter release ${GITHUB_REF_NAME}. See release-manifest.json and checksums.txt for provenance."

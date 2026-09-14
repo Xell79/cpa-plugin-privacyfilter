@@ -14,12 +14,21 @@ import (
 )
 
 const (
-	defaultMaxBodyBytes        = 32 << 20
-	defaultMaxDepth            = 256
-	defaultMaxNodes            = 1_000_000
-	defaultMaxStringBytes      = 8 << 20
-	defaultMaxReplacements     = 100_000
-	defaultMaxReplacementBytes = 32 << 20
+	hardMaxBodyBytes        = 32 << 20
+	hardMaxDepth            = 128
+	hardMaxNodes            = 250_000
+	hardMaxStructuralBytes  = 128 << 20
+	hardMaxStringBytes      = 8 << 20
+	hardMaxReplacements     = 100_000
+	hardMaxReplacementBytes = 32 << 20
+
+	defaultMaxBodyBytes        = hardMaxBodyBytes
+	defaultMaxDepth            = hardMaxDepth
+	defaultMaxNodes            = hardMaxNodes
+	defaultMaxStructuralBytes  = hardMaxStructuralBytes
+	defaultMaxStringBytes      = hardMaxStringBytes
+	defaultMaxReplacements     = hardMaxReplacements
+	defaultMaxReplacementBytes = hardMaxReplacementBytes
 )
 
 var (
@@ -34,6 +43,9 @@ var (
 	ErrDepthLimit = errors.New("payload: JSON depth limit exceeded")
 	// ErrNodeLimit means MaxNodes was exceeded.
 	ErrNodeLimit = errors.New("payload: JSON node limit exceeded")
+	// ErrStructuralLimit means retained scanner or walker structure exceeded its
+	// bounded memory budget.
+	ErrStructuralLimit = errors.New("payload: JSON structural retention limit exceeded")
 	// ErrStringTooLarge means a decoded JSON string, including an object key,
 	// exceeded MaxStringBytes.
 	ErrStringTooLarge = errors.New("payload: JSON string exceeds byte limit")
@@ -203,8 +215,8 @@ func (p Path) String() string {
 }
 
 // Limits bounds scanning and replacement work. A zero field selects the
-// corresponding value from DefaultLimits. Negative fields are rejected.
-// Limits cannot be disabled.
+// corresponding value from DefaultLimits. Negative fields and values above the
+// fixed package maxima are rejected. Limits cannot be disabled.
 type Limits struct {
 	// MaxBodyBytes bounds the complete input, including surrounding whitespace.
 	MaxBodyBytes int
@@ -213,6 +225,9 @@ type Limits struct {
 	// MaxNodes bounds JSON values, including the root and container values.
 	// Object keys are structural and are not counted as nodes.
 	MaxNodes int
+	// MaxStructuralBytes bounds conservatively accounted retained path, token,
+	// and walker-tree storage. It excludes the caller-owned body bytes.
+	MaxStructuralBytes int
 	// MaxStringBytes bounds the decoded UTF-8 byte length of every JSON string,
 	// including object keys, and of each requested replacement value.
 	MaxStringBytes int
@@ -229,6 +244,7 @@ func DefaultLimits() Limits {
 		MaxBodyBytes:        defaultMaxBodyBytes,
 		MaxDepth:            defaultMaxDepth,
 		MaxNodes:            defaultMaxNodes,
+		MaxStructuralBytes:  defaultMaxStructuralBytes,
 		MaxStringBytes:      defaultMaxStringBytes,
 		MaxReplacements:     defaultMaxReplacements,
 		MaxReplacementBytes: defaultMaxReplacementBytes,
@@ -242,7 +258,8 @@ func (l Limits) Normalized() (Limits, error) {
 
 func (l Limits) normalized() (Limits, error) {
 	if l.MaxBodyBytes < 0 || l.MaxDepth < 0 || l.MaxNodes < 0 ||
-		l.MaxStringBytes < 0 || l.MaxReplacements < 0 || l.MaxReplacementBytes < 0 {
+		l.MaxStructuralBytes < 0 || l.MaxStringBytes < 0 ||
+		l.MaxReplacements < 0 || l.MaxReplacementBytes < 0 {
 		return Limits{}, ErrInvalidLimits
 	}
 	defaults := DefaultLimits()
@@ -255,6 +272,9 @@ func (l Limits) normalized() (Limits, error) {
 	if l.MaxNodes == 0 {
 		l.MaxNodes = defaults.MaxNodes
 	}
+	if l.MaxStructuralBytes == 0 {
+		l.MaxStructuralBytes = defaults.MaxStructuralBytes
+	}
 	if l.MaxStringBytes == 0 {
 		l.MaxStringBytes = defaults.MaxStringBytes
 	}
@@ -263,6 +283,12 @@ func (l Limits) normalized() (Limits, error) {
 	}
 	if l.MaxReplacementBytes == 0 {
 		l.MaxReplacementBytes = defaults.MaxReplacementBytes
+	}
+	if l.MaxBodyBytes > hardMaxBodyBytes || l.MaxDepth > hardMaxDepth ||
+		l.MaxNodes > hardMaxNodes || l.MaxStructuralBytes > hardMaxStructuralBytes ||
+		l.MaxStringBytes > hardMaxStringBytes || l.MaxReplacements > hardMaxReplacements ||
+		l.MaxReplacementBytes > hardMaxReplacementBytes {
+		return Limits{}, fmt.Errorf("%w: configured payload limit exceeds hard maximum", ErrInvalidLimits)
 	}
 	return l, nil
 }
@@ -288,6 +314,41 @@ type StringToken struct {
 
 	document *Document
 	ordinal  int
+	pathRef  int32
+}
+
+// StringMetadata is a path-free view of one indexed string. It lets parsers
+// correlate a second token stream without materializing a complete path for
+// every string in an untrusted document.
+type StringMetadata struct {
+	Value      string
+	Span       Span
+	ParentKind Kind
+	Depth      int
+}
+
+const (
+	// MaxContextAncestors bounds retained object-key context for one selected
+	// string. Keys are nearest-first and never include array indexes.
+	MaxContextAncestors = 4
+	// MaxContextKeyBytes prevents attacker-controlled field names from being
+	// retained in selection metadata without a strict bound.
+	MaxContextKeyBytes = 64
+)
+
+// StringKeyContext is a value-free, bounded view of the object keys around a
+// string value. Keys are normalized to lowercase ASCII with '-' mapped to '_'.
+// ImmediateKey is empty for an array element; Ancestors then starts with the
+// nearest containing object key.
+type StringKeyContext struct {
+	ImmediateKey  string
+	Ancestors     [MaxContextAncestors]string
+	AncestorCount uint8
+}
+
+type pathNode struct {
+	parent  int32
+	segment PathSegment
 }
 
 // Replacement changes exactly one scanned string value. Replacement order is
@@ -303,11 +364,14 @@ type Replacement struct {
 // index. It retains the caller's body slice without copying it. The caller
 // must not mutate that slice while using Document.
 type Document struct {
-	body     []byte
-	rootKind Kind
-	rootSpan Span
-	limits   Limits
-	strings  []StringToken
+	body            []byte
+	rootKind        Kind
+	rootSpan        Span
+	limits          Limits
+	strings         []StringToken
+	paths           []pathNode
+	structuralBytes int
+	nodeCount       int
 }
 
 // Scan validates exactly one JSON document and indexes only its string
@@ -328,16 +392,19 @@ func Scan(ctx context.Context, body []byte, opts ScanOptions) (*Document, error)
 		return nil, err
 	}
 
-	rootKind, rootSpan, stringsFound, err := scanJSON(ctx, body, limits)
+	rootKind, rootSpan, stringsFound, paths, structuralBytes, nodeCount, err := scanJSON(ctx, body, limits)
 	if err != nil {
 		return nil, err
 	}
 	doc := &Document{
-		body:     body,
-		rootKind: rootKind,
-		rootSpan: rootSpan,
-		limits:   limits,
-		strings:  stringsFound,
+		body:            body,
+		rootKind:        rootKind,
+		rootSpan:        rootSpan,
+		limits:          limits,
+		strings:         stringsFound,
+		paths:           paths,
+		structuralBytes: structuralBytes,
+		nodeCount:       nodeCount,
 	}
 	for i := range doc.strings {
 		doc.strings[i].document = doc
@@ -364,13 +431,114 @@ func (d *Document) RootKind() Kind { return d.rootKind }
 // RootSpan returns the raw root-value range, excluding surrounding whitespace.
 func (d *Document) RootSpan() Span { return d.rootSpan }
 
+// EffectiveLimits returns the normalized limits used to scan this document.
+func (d *Document) EffectiveLimits() Limits { return d.limits }
+
+// StructuralBytes returns the scanner's conservative retained-structure
+// accounting. It excludes the caller-owned body and any paths later
+// materialized by callers of Strings or StringAt.
+func (d *Document) StructuralBytes() int { return d.structuralBytes }
+
+// NodeCount returns the number of JSON values validated by the scanner,
+// including the root and container values. Object keys are not nodes.
+func (d *Document) NodeCount() int { return d.nodeCount }
+
+// StringCount returns the number of indexed string values without allocating
+// paths.
+func (d *Document) StringCount() int { return len(d.strings) }
+
+// StringMetadataAt returns path-free metadata for one string ordinal.
+func (d *Document) StringMetadataAt(index int) (StringMetadata, bool) {
+	if d == nil || index < 0 || index >= len(d.strings) {
+		return StringMetadata{}, false
+	}
+	token := d.strings[index]
+	return StringMetadata{
+		Value: token.Value, Span: token.Span,
+		ParentKind: token.ParentKind, Depth: token.Depth,
+	}, true
+}
+
+// StringKeyContextAt returns bounded, normalized field-name context without
+// materializing or retaining a complete path.
+func (d *Document) StringKeyContextAt(index int) (StringKeyContext, bool) {
+	if d == nil || index < 0 || index >= len(d.strings) {
+		return StringKeyContext{}, false
+	}
+	var result StringKeyContext
+	current := d.strings[index].pathRef
+	if current < 0 {
+		return result, true
+	}
+	if key, ok := d.paths[current].segment.KeyValue(); ok {
+		result.ImmediateKey = normalizeContextKey(key)
+		current = d.paths[current].parent
+	} else {
+		current = d.paths[current].parent
+	}
+	for current >= 0 && int(result.AncestorCount) < len(result.Ancestors) {
+		if key, ok := d.paths[current].segment.KeyValue(); ok {
+			normalized := normalizeContextKey(key)
+			if normalized != "" {
+				result.Ancestors[result.AncestorCount] = normalized
+				result.AncestorCount++
+			}
+		}
+		current = d.paths[current].parent
+	}
+	return result, true
+}
+
+func normalizeContextKey(key string) string {
+	if len(key) == 0 || len(key) > MaxContextKeyBytes {
+		return ""
+	}
+	changed := false
+	for index := 0; index < len(key); index++ {
+		value := key[index]
+		switch {
+		case value >= 'A' && value <= 'Z', value == '-':
+			changed = true
+		case value >= 'a' && value <= 'z', value >= '0' && value <= '9', value == '_':
+		default:
+			return ""
+		}
+	}
+	if !changed {
+		return key
+	}
+	var normalized strings.Builder
+	normalized.Grow(len(key))
+	for index := 0; index < len(key); index++ {
+		value := key[index]
+		switch {
+		case value >= 'A' && value <= 'Z':
+			normalized.WriteByte(value + ('a' - 'A'))
+		case value == '-':
+			normalized.WriteByte('_')
+		default:
+			normalized.WriteByte(value)
+		}
+	}
+	return normalized.String()
+}
+
+// StringTokenAt returns one indexed string token and materializes only that
+// token's path. The returned path is independent from document storage.
+func (d *Document) StringTokenAt(index int) (StringToken, bool) {
+	if d == nil || index < 0 || index >= len(d.strings) {
+		return StringToken{}, false
+	}
+	return d.cloneToken(d.strings[index]), true
+}
+
 // Strings returns string value tokens in document order. The returned slice
 // and each Path are independent copies; token identity is retained for
 // Replace.
 func (d *Document) Strings() []StringToken {
 	out := make([]StringToken, len(d.strings))
 	for i := range d.strings {
-		out[i] = cloneToken(d.strings[i])
+		out[i] = d.cloneToken(d.strings[i])
 	}
 	return out
 }
@@ -380,8 +548,8 @@ func (d *Document) Strings() []StringToken {
 func (d *Document) StringsAt(path Path) []StringToken {
 	var out []StringToken
 	for i := range d.strings {
-		if d.strings[i].Path.Equal(path) {
-			out = append(out, cloneToken(d.strings[i]))
+		if d.pathEqual(d.strings[i].pathRef, path) {
+			out = append(out, d.cloneToken(d.strings[i]))
 		}
 	}
 	return out
@@ -392,13 +560,13 @@ func (d *Document) StringsAt(path Path) []StringToken {
 func (d *Document) StringAt(path Path) (StringToken, error) {
 	var found *StringToken
 	for i := range d.strings {
-		if !d.strings[i].Path.Equal(path) {
+		if !d.pathEqual(d.strings[i].pathRef, path) {
 			continue
 		}
 		if found != nil {
 			return StringToken{}, ErrPathAmbiguous
 		}
-		token := cloneToken(d.strings[i])
+		token := d.cloneToken(d.strings[i])
 		found = &token
 	}
 	if found == nil {
@@ -426,9 +594,32 @@ func (d *Document) Replace(ctx context.Context, replacements []Replacement) (out
 	return d.replace(ctx, replacements)
 }
 
-func cloneToken(token StringToken) StringToken {
-	token.Path = token.Path.Clone()
+func (d *Document) cloneToken(token StringToken) StringToken {
+	token.Path = d.materializePath(token.pathRef)
 	return token
+}
+
+func (d *Document) materializePath(ref int32) Path {
+	depth := 0
+	for current := ref; current >= 0; current = d.paths[current].parent {
+		depth++
+	}
+	path := make(Path, depth)
+	for current, index := ref, depth-1; current >= 0; current, index = d.paths[current].parent, index-1 {
+		path[index] = d.paths[current].segment
+	}
+	return path
+}
+
+func (d *Document) pathEqual(ref int32, path Path) bool {
+	index := len(path) - 1
+	for current := ref; current >= 0; current = d.paths[current].parent {
+		if index < 0 || d.paths[current].segment != path[index] {
+			return false
+		}
+		index--
+	}
+	return index == -1
 }
 
 func (d *Document) canonicalToken(token StringToken) (StringToken, error) {
@@ -438,7 +629,7 @@ func (d *Document) canonicalToken(token StringToken) (StringToken, error) {
 	canonical := d.strings[token.ordinal]
 	if token.Value != canonical.Value || token.Span != canonical.Span ||
 		token.ParentKind != canonical.ParentKind || token.Depth != canonical.Depth ||
-		!token.Path.Equal(canonical.Path) {
+		!d.pathEqual(canonical.pathRef, token.Path) {
 		return StringToken{}, ErrInvalidToken
 	}
 	return canonical, nil

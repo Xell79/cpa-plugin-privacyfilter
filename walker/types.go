@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
 )
 
 // Protocol identifies the request schema used to select targets. Protocol
@@ -44,8 +44,8 @@ const (
 	TargetKindEncodedJSON TargetKind = "encoded-json"
 	// TargetKindJSONValue is a string leaf in a native arbitrary JSON subtree.
 	TargetKindJSONValue TargetKind = "json-value"
-	// TargetKindToolOutput is a direct string tool result. It may contain JSON or
-	// plain text, but the distinction is intentionally left to the redactor.
+	// TargetKindToolOutput is model-visible tool-result text. It may contain JSON
+	// or plain text, but the distinction is intentionally left to the redactor.
 	TargetKindToolOutput TargetKind = "tool-output"
 	// TargetKindCode is source code carried as a string.
 	TargetKindCode TargetKind = "code"
@@ -83,14 +83,25 @@ func (m Mutability) String() string {
 	}
 }
 
-// Target is one protocol-approved JSON string value. Path is an independent
-// copy of Token.Path so callers can retain diagnostic metadata separately.
+// TargetContext carries only bounded field-name and semantic metadata. It
+// never stores a string value or complete path.
+type TargetContext struct {
+	Fields     payload.StringKeyContext
+	ToolScope  Scope
+	Structured bool
+	Encoded    bool
+}
+
+// Target is one protocol-approved JSON string value. Path and Token.Path are
+// independent immutable views so accidental diagnostic mutation cannot alter
+// the token used for replacement.
 type Target struct {
 	Token   payload.StringToken
 	Path    payload.Path
 	Scope   Scope
 	Kind    TargetKind
 	Mutable Mutability
+	Context TargetContext
 }
 
 // UnsupportedShape records a content/block shape the walker deliberately did
@@ -122,6 +133,11 @@ type Result struct {
 	Opaque           int
 	UnsupportedCount int
 	Unsupported      []UnsupportedShape
+	// JSONNodes and StructuralBytes expose value-free cumulative accounting from
+	// the outer scanner and walker so encoded-JSON inspection can share the same
+	// request limits.
+	JSONNodes       int
+	StructuralBytes int
 }
 
 var (

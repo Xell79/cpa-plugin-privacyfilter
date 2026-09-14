@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
-	"github.com/rheodev/cpa-plugin-privacyfilter/walker"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/walker"
 )
 
 func TestSelectedTargetReplacePreservesAllOtherBytes(t *testing.T) {
@@ -16,7 +16,7 @@ func TestSelectedTargetReplacePreservesAllOtherBytes(t *testing.T) {
 		"  \"input\" : [\n" +
 		"    {\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"secr\\u0065t\"}]},\n" +
 		"    {\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"{\\\"value\\\":\\\"leave escaped\\u0020bytes\\\"}\"},\n" +
-		"    {\"type\":\"reasoning\",\"encrypted_content\":\"opaque\\u0020bytes\",\"signature\":\"opaque-signature\"}\n" +
+		"    {\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"encrypted_content\":\"opaque\\u0020bytes\"}\n" +
 		"  ],\n" +
 		"  \"big\" : 900719925474099312345678901234567890,\n" +
 		"  \"decimal\" : -1.2300e+009,\n" +
@@ -36,7 +36,7 @@ func TestSelectedTargetReplacePreservesAllOtherBytes(t *testing.T) {
 		}
 	}
 	if selected == nil || selected.Token.Value != "secret" {
-		t.Fatalf("escaped target not selected: %#v", result.Targets)
+		t.Fatalf("escaped target not selected: target_count=%d selected=%t", len(result.Targets), selected != nil)
 	}
 
 	out, changed, err := result.Document.Replace(context.Background(), []payload.Replacement{{
@@ -51,22 +51,22 @@ func TestSelectedTargetReplacePreservesAllOtherBytes(t *testing.T) {
 	}
 	want := bytes.Replace(original, []byte(`"secr\u0065t"`), []byte(`"REDACTED<&>"`), 1)
 	if !bytes.Equal(out, want) {
-		t.Fatalf("replacement changed bytes outside selected token:\n got %s\nwant %s", out, want)
+		t.Fatalf("replacement changed bytes outside selected token: got_len=%d want_len=%d", len(out), len(want))
 	}
 	if !json.Valid(out) {
-		t.Fatalf("replacement is invalid JSON: %s", out)
+		t.Fatalf("replacement is invalid JSON: output_len=%d", len(out))
 	}
-	for _, exact := range [][]byte{
+	for index, exact := range [][]byte{
 		[]byte(`900719925474099312345678901234567890`),
 		[]byte(`-1.2300e+009`),
 		[]byte(`"{\"value\":\"leave escaped\u0020bytes\"}"`),
 		[]byte(`"opaque\u0020bytes"`),
-		[]byte(`"opaque-signature"`),
+		[]byte(`"rs_1"`),
 		[]byte(`"duplicate" : "first", "duplicate" : "second"`),
 		[]byte(`"preserve\/slash and \u263a"`),
 	} {
 		if !bytes.Contains(out, exact) {
-			t.Errorf("exact opaque/format bytes %q were not preserved", exact)
+			t.Errorf("exact opaque/format fixture %d was not preserved", index)
 		}
 	}
 }

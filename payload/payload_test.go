@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
 )
 
 func mustScan(t *testing.T, body []byte, opts payload.ScanOptions) *payload.Document {
@@ -95,7 +95,7 @@ func TestScanEnumeratesValueStringsWithRawContext(t *testing.T) {
 	}
 	root := doc.RootSpan()
 	if got := string(body[root.Start:root.End]); !strings.HasPrefix(got, "{") || !strings.HasSuffix(got, "}") {
-		t.Fatalf("RootSpan() selected %q", got)
+		t.Fatalf("RootSpan() mismatch selected_len=%d", len(got))
 	}
 
 	tokens := doc.Strings()
@@ -108,7 +108,7 @@ func TestScanEnumeratesValueStringsWithRawContext(t *testing.T) {
 		t.Fatalf("token path = %s, want %s", token.Path, wantPath)
 	}
 	if token.Value != "line\n世界" {
-		t.Fatalf("decoded value = %q", token.Value)
+		t.Fatalf("decoded value mismatch: got_len=%d", len(token.Value))
 	}
 	if token.ParentKind != payload.KindArray || token.Depth != 4 {
 		t.Fatalf("context = parent %s depth %d, want array depth 4", token.ParentKind, token.Depth)
@@ -119,13 +119,13 @@ func TestScanEnumeratesValueStringsWithRawContext(t *testing.T) {
 	}
 	wantRaw := `"line` + string('\\') + `n` + string('\\') + `u4e16` + string('\\') + `u754c"`
 	if got := string(raw); got != wantRaw {
-		t.Fatalf("raw token = %q, want %q", got, wantRaw)
+		t.Fatalf("raw token mismatch: got_len=%d want_len=%d", len(got), len(wantRaw))
 	}
 	if token.Span.Len() != len(raw) || !bytes.Equal(raw, body[token.Span.Start:token.Span.End]) {
 		t.Fatal("raw span does not refer to the original body")
 	}
 	if got := doc.StringsAt(wantPath); len(got) != 1 || got[0].Value != token.Value {
-		t.Fatalf("StringsAt() = %#v", got)
+		t.Fatalf("StringsAt() mismatch: count=%d", len(got))
 	}
 
 	// Returned path storage is independent from the document's index.
@@ -133,6 +133,58 @@ func TestScanEnumeratesValueStringsWithRawContext(t *testing.T) {
 	again := mustStringAt(t, doc, wantPath)
 	if !again.Path.Equal(wantPath) {
 		t.Fatal("caller mutation changed the document index")
+	}
+}
+
+func TestStringKeyContextIsBoundedNormalizedAndValueFree(t *testing.T) {
+	body := []byte(`{"API-Key":"first","outer":{"token":["second",{"inner":"third"}]},"bad key":{"SK":"fourth"},"token":{"bad key":{"worse.key":["fifth"]}}}`)
+	doc := mustScanObject(t, body, payload.ScanOptions{})
+	if doc.StringCount() != 5 {
+		t.Fatalf("StringCount() = %d, want 5", doc.StringCount())
+	}
+
+	cases := []struct {
+		index     int
+		immediate string
+		ancestors []string
+	}{
+		{index: 0, immediate: "api_key"},
+		{index: 1, ancestors: []string{"token", "outer"}},
+		{index: 2, immediate: "inner", ancestors: []string{"token", "outer"}},
+		{index: 3, immediate: "sk"},
+		{index: 4, ancestors: []string{"token"}},
+	}
+	for _, testCase := range cases {
+		context, ok := doc.StringKeyContextAt(testCase.index)
+		if !ok {
+			t.Fatalf("context %d unavailable", testCase.index)
+		}
+		if context.ImmediateKey != testCase.immediate || int(context.AncestorCount) != len(testCase.ancestors) {
+			t.Fatalf("context %d metadata mismatch", testCase.index)
+		}
+		for ancestorIndex, want := range testCase.ancestors {
+			if context.Ancestors[ancestorIndex] != want {
+				t.Fatalf("context %d ancestor %d mismatch", testCase.index, ancestorIndex)
+			}
+		}
+	}
+	if _, ok := doc.StringKeyContextAt(-1); ok {
+		t.Fatal("negative string index returned context")
+	}
+	if _, ok := doc.StringKeyContextAt(doc.StringCount()); ok {
+		t.Fatal("out-of-range string index returned context")
+	}
+
+	deep := mustScanObject(t, []byte(`{"one":{"two":{"three":{"four":{"five":{"six":"value"}}}}}}`), payload.ScanOptions{})
+	bounded, ok := deep.StringKeyContextAt(0)
+	if !ok || bounded.ImmediateKey != "six" || bounded.AncestorCount != payload.MaxContextAncestors {
+		t.Fatal("deep field context was not bounded")
+	}
+	wantAncestors := []string{"five", "four", "three", "two"}
+	for index, want := range wantAncestors {
+		if bounded.Ancestors[index] != want {
+			t.Fatalf("bounded ancestor %d mismatch", index)
+		}
 	}
 }
 
@@ -148,21 +200,21 @@ func TestScanRootDocumentAndObjectValidation(t *testing.T) {
 		{`["root"]`, payload.KindArray},
 		{" \r\n{}\t", payload.KindObject},
 	}
-	for _, tc := range validRoots {
+	for index, tc := range validRoots {
 		doc, err := payload.Scan(context.Background(), []byte(tc.body), payload.ScanOptions{})
 		if err != nil {
-			t.Errorf("Scan(%q): %v", tc.body, err)
+			t.Errorf("Scan root index=%d body_len=%d: %v", index, len(tc.body), err)
 			continue
 		}
 		if doc.RootKind() != tc.kind {
-			t.Errorf("Scan(%q) kind = %s, want %s", tc.body, doc.RootKind(), tc.kind)
+			t.Errorf("Scan root index=%d kind=%s want=%s", index, doc.RootKind(), tc.kind)
 		}
 		_, objectErr := payload.ScanObject(context.Background(), []byte(tc.body), payload.ScanOptions{})
 		if tc.kind == payload.KindObject && objectErr != nil {
-			t.Errorf("ScanObject(%q): %v", tc.body, objectErr)
+			t.Errorf("ScanObject root index=%d body_len=%d: %v", index, len(tc.body), objectErr)
 		}
 		if tc.kind != payload.KindObject && !errors.Is(objectErr, payload.ErrRootNotObject) {
-			t.Errorf("ScanObject(%q) error = %v, want ErrRootNotObject", tc.body, objectErr)
+			t.Errorf("ScanObject root index=%d error=%v want=ErrRootNotObject", index, objectErr)
 		}
 	}
 
@@ -171,9 +223,9 @@ func TestScanRootDocumentAndObjectValidation(t *testing.T) {
 		`{"a":"bad\x"}`, `{"a":"unterminated}`, `01`, `1.`, `1e`, `-`,
 		"{\"a\":\"line\nbreak\"}",
 	}
-	for _, body := range invalid {
+	for index, body := range invalid {
 		if _, err := payload.Scan(context.Background(), []byte(body), payload.ScanOptions{}); !errors.Is(err, payload.ErrInvalidJSON) {
-			t.Errorf("Scan(%q) error = %v, want ErrInvalidJSON", body, err)
+			t.Errorf("invalid JSON index=%d body_len=%d error=%v want=ErrInvalidJSON", index, len(body), err)
 		}
 	}
 }
@@ -212,12 +264,12 @@ func TestReplacePreservesUnselectedBytes(t *testing.T) {
 
 	want := bytes.Replace(body, []byte(`"replace me"`), []byte(`"<tag>& \"quoted\" 世界"`), 1)
 	if !bytes.Equal(out, want) {
-		t.Fatalf("only selected raw span may change:\n got %s\nwant %s", out, want)
+		t.Fatalf("only selected raw span may change: got_len=%d want_len=%d", len(out), len(want))
 	}
 	if !json.Valid(out) {
-		t.Fatalf("output is invalid JSON: %s", out)
+		t.Fatalf("output is invalid JSON: output_len=%d", len(out))
 	}
-	for _, preserved := range [][]byte{
+	for index, preserved := range [][]byte{
 		[]byte(`9007199254740993`),
 		[]byte(`-1.2300e+09`),
 		[]byte(`"<&>"`),
@@ -229,11 +281,11 @@ func TestReplacePreservesUnselectedBytes(t *testing.T) {
 		[]byte(`"unicode": "你好 😀"`),
 	} {
 		if !bytes.Contains(out, preserved) {
-			t.Errorf("preserved bytes %q missing from output", preserved)
+			t.Errorf("preserved byte fixture %d missing from output", index)
 		}
 	}
 	if !bytes.Contains(out, []byte(`<tag>&`)) {
-		t.Fatalf("replacement HTML characters were escaped: %s", out)
+		t.Fatalf("replacement HTML characters were escaped: output_len=%d", len(out))
 	}
 }
 
@@ -251,7 +303,7 @@ func TestUnchangedReturnsOriginalBackingBytes(t *testing.T) {
 
 	token := mustStringAt(t, doc, payload.Path{payload.Key("escaped")})
 	if token.Value != "same value" {
-		t.Fatalf("decoded value = %q", token.Value)
+		t.Fatalf("decoded value mismatch: got_len=%d", len(token.Value))
 	}
 	out, changed, err = doc.Replace(context.Background(), []payload.Replacement{{Token: token, Value: token.Value}})
 	if err != nil || changed {
@@ -286,7 +338,7 @@ func TestMultipleReplacementsAreOrderedTransactionally(t *testing.T) {
 	}
 	const want = `{"a":"\"1\"","nested":["line\n2",{"x":"3<&>"}],"keep":"four"}`
 	if string(out) != want {
-		t.Fatalf("Replace = %s, want %s", out, want)
+		t.Fatalf("Replace mismatch: got_len=%d want_len=%d", len(out), len(want))
 	}
 	if !bytes.Equal(body, original) {
 		t.Fatal("transaction mutated the source body")
@@ -301,7 +353,7 @@ func TestDuplicateKeysRemainDistinctTokens(t *testing.T) {
 	doc := mustScanObject(t, body, payload.ScanOptions{})
 	duplicates := doc.StringsAt(payload.Path{payload.Key("a")})
 	if len(duplicates) != 2 || duplicates[0].Value != "first" || duplicates[1].Value != "second" {
-		t.Fatalf("duplicate tokens = %#v", duplicates)
+		t.Fatalf("duplicate token mismatch: count=%d", len(duplicates))
 	}
 	if _, err := doc.StringAt(payload.Path{payload.Key("a")}); !errors.Is(err, payload.ErrPathAmbiguous) {
 		t.Fatalf("StringAt duplicate error = %v", err)
@@ -322,7 +374,7 @@ func TestDuplicateKeysRemainDistinctTokens(t *testing.T) {
 	}
 	const want = `{"a":"FIRST","a":"SECOND","0":"object-zero","arr":["array-zero"]}`
 	if string(out) != want {
-		t.Fatalf("Replace duplicates = %s", out)
+		t.Fatalf("Replace duplicates mismatch: got_len=%d want_len=%d", len(out), len(want))
 	}
 }
 
@@ -337,7 +389,7 @@ func TestOverlappingAndInvalidReplacementsAreRejected(t *testing.T) {
 		{Token: a, Value: "second"},
 	})
 	if !errors.Is(err, payload.ErrOverlappingReplacements) || out != nil || changed {
-		t.Fatalf("overlap = out %q, changed %v, err %v", out, changed, err)
+		t.Fatalf("overlap = out_len %d, changed %v, err %v", len(out), changed, err)
 	}
 	if !bytes.Equal(body, original) {
 		t.Fatal("failed transaction mutated input")
@@ -346,7 +398,7 @@ func TestOverlappingAndInvalidReplacementsAreRejected(t *testing.T) {
 	modified := a
 	modified.Span.Start++
 	if out, changed, err = doc.Replace(context.Background(), []payload.Replacement{{Token: modified, Value: "x"}}); !errors.Is(err, payload.ErrInvalidToken) || out != nil || changed {
-		t.Fatalf("modified token = out %q, changed %v, err %v", out, changed, err)
+		t.Fatalf("modified token = out_len %d, changed %v, err %v", len(out), changed, err)
 	}
 
 	other := mustScanObject(t, []byte(`{"a":"one"}`), payload.ScanOptions{})
@@ -404,6 +456,121 @@ func TestScanLimits(t *testing.T) {
 	})
 }
 
+func TestHardScanLimitsCannotBeRaised(t *testing.T) {
+	defaults := payload.DefaultLimits()
+	if defaults.MaxBodyBytes != 32<<20 || defaults.MaxDepth != 128 ||
+		defaults.MaxNodes != 250_000 || defaults.MaxStructuralBytes != 128<<20 ||
+		defaults.MaxStringBytes != 8<<20 || defaults.MaxReplacements != 100_000 ||
+		defaults.MaxReplacementBytes != 32<<20 {
+		t.Fatalf("unexpected hard defaults: %+v", defaults)
+	}
+
+	cases := []payload.Limits{
+		{MaxBodyBytes: defaults.MaxBodyBytes + 1},
+		{MaxDepth: defaults.MaxDepth + 1},
+		{MaxNodes: defaults.MaxNodes + 1},
+		{MaxStructuralBytes: defaults.MaxStructuralBytes + 1},
+		{MaxStringBytes: defaults.MaxStringBytes + 1},
+		{MaxReplacements: defaults.MaxReplacements + 1},
+		{MaxReplacementBytes: defaults.MaxReplacementBytes + 1},
+	}
+	for _, limits := range cases {
+		if _, err := limits.Normalized(); !errors.Is(err, payload.ErrInvalidLimits) {
+			t.Errorf("Normalized(%+v) error = %v, want ErrInvalidLimits", limits, err)
+		}
+	}
+}
+
+func TestStructuralRetentionLimit(t *testing.T) {
+	_, err := payload.ScanObject(
+		context.Background(),
+		[]byte(`{"a":"b"}`),
+		payload.ScanOptions{Limits: payload.Limits{MaxStructuralBytes: 1_000}},
+	)
+	if !errors.Is(err, payload.ErrStructuralLimit) {
+		t.Fatalf("error = %v, want ErrStructuralLimit", err)
+	}
+}
+
+func wideDeepStringBody(depth, leaves int) []byte {
+	var body strings.Builder
+	body.Grow(depth*6 + leaves*4 + 1)
+	for range depth {
+		body.WriteString(`{"k":`)
+	}
+	body.WriteByte('[')
+	for index := 0; index < leaves; index++ {
+		if index != 0 {
+			body.WriteByte(',')
+		}
+		body.WriteString(`"x"`)
+	}
+	body.WriteByte(']')
+	for range depth {
+		body.WriteByte('}')
+	}
+	return []byte(body.String())
+}
+
+func scanStringStats(t *testing.T, depth, leaves int) (stringsFound, retained int) {
+	t.Helper()
+	document := mustScanObject(t, wideDeepStringBody(depth, leaves), payload.ScanOptions{})
+	if _, ok := document.StringMetadataAt(leaves - 1); !ok {
+		t.Fatalf("last string metadata unavailable at depth %d with %d leaves", depth, leaves)
+	}
+	return document.StringCount(), document.StructuralBytes()
+}
+
+func TestScannerStringRetentionScalesWithNodesNotDepthProduct(t *testing.T) {
+	const leaves = 4_000
+	shallowCount, shallowRetained := scanStringStats(t, 8, leaves)
+	deepCount, deepRetained := scanStringStats(t, 96, leaves)
+	if shallowCount != leaves || deepCount != leaves {
+		t.Fatalf("string counts = shallow %d, deep %d; want %d", shallowCount, deepCount, leaves)
+	}
+	if deepRetained > shallowRetained+1<<20 {
+		t.Fatalf("deep scan retained %d bytes versus shallow %d", deepRetained, shallowRetained)
+	}
+
+	wideCount, wideRetained := scanStringStats(t, 96, 2*leaves)
+	if wideCount != 2*leaves {
+		t.Fatalf("wide string count = %d, want %d", wideCount, 2*leaves)
+	}
+	if wideRetained > deepRetained*5/2 {
+		t.Fatalf("doubling string nodes grew retention from %d to %d", deepRetained, wideRetained)
+	}
+}
+
+var scannerDocumentSink *payload.Document
+
+func scannerAllocatedBytesPerScan(t *testing.T, depth, leaves int) int64 {
+	t.Helper()
+	body := wideDeepStringBody(depth, leaves)
+	result := testing.Benchmark(func(benchmark *testing.B) {
+		for range benchmark.N {
+			document, err := payload.ScanObject(context.Background(), body, payload.ScanOptions{})
+			if err != nil {
+				benchmark.Fatal(err)
+			}
+			scannerDocumentSink = document
+		}
+	})
+	return result.AllocedBytesPerOp()
+}
+
+func TestScannerStringAllocationDoesNotScaleByLeafDepth(t *testing.T) {
+	const leaves = 1_000
+	shallow := scannerAllocatedBytesPerScan(t, 8, leaves)
+	deep := scannerAllocatedBytesPerScan(t, 96, leaves)
+	wide := scannerAllocatedBytesPerScan(t, 96, 2*leaves)
+	if deep > shallow*2 {
+		t.Fatalf("deep scan allocated %d bytes versus shallow %d", deep, shallow)
+	}
+	if wide > deep*5/2 {
+		t.Fatalf("doubling string nodes grew allocations from %d to %d", deep, wide)
+	}
+}
+
 func TestReplacementLimits(t *testing.T) {
 	t.Run("count", func(t *testing.T) {
 		body := []byte(`{"a":"x","b":"y"}`)
@@ -414,7 +581,7 @@ func TestReplacementLimits(t *testing.T) {
 			{Token: tokens[1], Value: "Y"},
 		})
 		if !errors.Is(err, payload.ErrReplacementLimit) || out != nil || changed {
-			t.Fatalf("Replace = out %q, changed %v, err %v", out, changed, err)
+			t.Fatalf("Replace = out_len %d, changed %v, err %v", len(out), changed, err)
 		}
 	})
 
@@ -438,7 +605,7 @@ func TestReplacementLimits(t *testing.T) {
 		}
 		out, changed, err := doc.Replace(context.Background(), []payload.Replacement{{Token: token, Value: "ab"}})
 		if err != nil || !changed || string(out) != `{"a":"ab"}` {
-			t.Fatalf("exact budget = out %s, changed %v, err %v", out, changed, err)
+			t.Fatalf("exact budget = out_len %d, changed %v, err %v", len(out), changed, err)
 		}
 	})
 }
@@ -498,7 +665,7 @@ func TestContextCancellation(t *testing.T) {
 		cancel()
 		out, changed, err := doc.Replace(ctx, []payload.Replacement{{Token: token, Value: "c"}})
 		if !errors.Is(err, context.Canceled) || out != nil || changed {
-			t.Fatalf("Replace = out %q, changed %v, err %v", out, changed, err)
+			t.Fatalf("Replace = out_len %d, changed %v, err %v", len(out), changed, err)
 		}
 	})
 }

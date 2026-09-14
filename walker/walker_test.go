@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/walker"
+	"github.com/ahoo/cpa-plugin-privacyfilter/walker"
 )
 
 type wantTarget struct {
@@ -29,18 +29,22 @@ func mustWalk(t *testing.T, format, body string) *walker.Result {
 func checkTargets(t *testing.T, result *walker.Result, want []wantTarget) {
 	t.Helper()
 	if len(result.Targets) != len(want) {
-		paths := make([]string, len(result.Targets))
-		for i := range result.Targets {
-			paths[i] = result.Targets[i].Path.String() + "=" + result.Targets[i].Token.Value
-		}
-		t.Fatalf("got %d targets, want %d\ngot: %#v", len(result.Targets), len(want), paths)
+		t.Fatalf("target count=%d want=%d", len(result.Targets), len(want))
 	}
 	for i, expected := range want {
 		got := result.Targets[i]
 		if got.Path.String() != expected.path || got.Token.Value != expected.value || got.Scope != expected.scope || got.Kind != expected.kind || got.Mutable != expected.mutable {
-			t.Errorf("target[%d] = {%s %q %s %s %s}, want {%s %q %s %s %s}",
-				i, got.Path, got.Token.Value, got.Scope, got.Kind, got.Mutable,
-				expected.path, expected.value, expected.scope, expected.kind, expected.mutable)
+			t.Errorf(
+				"target[%d] mismatch path=%t value=%t scope=%t kind=%t mutable=%t value_len=%d want_value_len=%d",
+				i,
+				got.Path.String() == expected.path,
+				got.Token.Value == expected.value,
+				got.Scope == expected.scope,
+				got.Kind == expected.kind,
+				got.Mutable == expected.mutable,
+				len(got.Token.Value),
+				len(expected.value),
+			)
 		}
 		if !got.Token.Path.Equal(got.Path) {
 			t.Errorf("target[%d] token path %s differs from target path %s", i, got.Token.Path, got.Path)
@@ -50,10 +54,10 @@ func checkTargets(t *testing.T, result *walker.Result, want []wantTarget) {
 
 func assertValuesNotTargeted(t *testing.T, result *walker.Result, values ...string) {
 	t.Helper()
-	for _, target := range result.Targets {
-		for _, value := range values {
+	for targetIndex, target := range result.Targets {
+		for valueIndex, value := range values {
 			if target.Token.Value == value {
-				t.Errorf("protected/control value %q unexpectedly targeted at %s", value, target.Path)
+				t.Errorf("protected/control value unexpectedly targeted target=%d value=%d path=%s", targetIndex, valueIndex, target.Path)
 			}
 		}
 	}

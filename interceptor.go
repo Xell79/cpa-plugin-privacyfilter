@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/internal/privacyengine"
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
-	"github.com/rheodev/cpa-plugin-privacyfilter/walker"
+	"github.com/ahoo/cpa-plugin-privacyfilter/internal/privacyengine"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/walker"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	log "github.com/sirupsen/logrus"
 )
@@ -163,6 +163,7 @@ func isLimitError(err error) bool {
 		errors.Is(err, payload.ErrBodyTooLarge) ||
 		errors.Is(err, payload.ErrDepthLimit) ||
 		errors.Is(err, payload.ErrNodeLimit) ||
+		errors.Is(err, payload.ErrStructuralLimit) ||
 		errors.Is(err, payload.ErrStringTooLarge) ||
 		errors.Is(err, payload.ErrReplacementLimit)
 }

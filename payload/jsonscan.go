@@ -15,43 +15,54 @@ import (
 	"unicode/utf8"
 )
 
-const contextCheckInterval = 1024
+const (
+	contextCheckInterval = 1024
+	rootPathRef          = int32(-1)
+
+	// These logical charges conservatively include slice backing storage and
+	// allocator overhead on supported 64-bit targets. Capacity growth is charged
+	// before allocation, so the retained scanner index never grows unbounded.
+	retainedPathNodeBytes    = 64
+	retainedStringTokenBytes = 128
+)
 
 type jsonScanner struct {
-	ctx       context.Context
-	body      []byte
-	limits    Limits
-	pos       int
-	nodes     int
-	lastCheck int
-	path      Path
-	strings   []StringToken
+	ctx             context.Context
+	body            []byte
+	limits          Limits
+	pos             int
+	nodes           int
+	lastCheck       int
+	path            int32
+	paths           []pathNode
+	strings         []StringToken
+	structuralBytes int
 }
 
-func scanJSON(ctx context.Context, body []byte, limits Limits) (Kind, Span, []StringToken, error) {
-	s := jsonScanner{ctx: ctx, body: body, limits: limits}
+func scanJSON(ctx context.Context, body []byte, limits Limits) (Kind, Span, []StringToken, []pathNode, int, int, error) {
+	s := jsonScanner{ctx: ctx, body: body, limits: limits, path: rootPathRef}
 	if err := s.skipWhitespace(); err != nil {
-		return KindInvalid, Span{}, nil, err
+		return KindInvalid, Span{}, nil, nil, 0, 0, err
 	}
 	if s.pos == len(body) {
-		return KindInvalid, Span{}, nil, invalidJSON(s.pos, "empty input")
+		return KindInvalid, Span{}, nil, nil, 0, 0, invalidJSON(s.pos, "empty input")
 	}
 	start := s.pos
 	kind, err := s.value(1, KindInvalid)
 	if err != nil {
-		return KindInvalid, Span{}, nil, err
+		return KindInvalid, Span{}, nil, nil, 0, 0, err
 	}
 	end := s.pos
 	if err := s.skipWhitespace(); err != nil {
-		return KindInvalid, Span{}, nil, err
+		return KindInvalid, Span{}, nil, nil, 0, 0, err
 	}
 	if s.pos != len(body) {
-		return KindInvalid, Span{}, nil, invalidJSON(s.pos, "data after root value")
+		return KindInvalid, Span{}, nil, nil, 0, 0, invalidJSON(s.pos, "data after root value")
 	}
 	if err := s.ctx.Err(); err != nil {
-		return KindInvalid, Span{}, nil, err
+		return KindInvalid, Span{}, nil, nil, 0, 0, err
 	}
-	return kind, Span{Start: start, End: end}, s.strings, nil
+	return kind, Span{Start: start, End: end}, s.strings, s.paths, s.structuralBytes, s.nodes, nil
 }
 
 func (s *jsonScanner) value(depth int, parent Kind) (Kind, error) {
@@ -86,13 +97,15 @@ func (s *jsonScanner) value(depth int, parent Kind) (Kind, error) {
 		if err != nil {
 			return KindInvalid, err
 		}
-		s.strings = append(s.strings, StringToken{
+		if err := s.appendString(StringToken{
 			Value:      value,
 			Span:       Span{Start: start, End: s.pos},
-			Path:       s.path.Clone(),
 			ParentKind: parent,
 			Depth:      depth,
-		})
+			pathRef:    s.path,
+		}); err != nil {
+			return KindInvalid, err
+		}
 		return KindString, nil
 	case 't':
 		if err := s.literal("true"); err != nil {
@@ -149,9 +162,14 @@ func (s *jsonScanner) object(depth int) error {
 			return err
 		}
 
-		s.path = append(s.path, Key(key))
+		previousPath := s.path
+		childPath, pathErr := s.appendPath(Key(key), len(key))
+		if pathErr != nil {
+			return pathErr
+		}
+		s.path = childPath
 		_, err = s.value(depth+1, KindObject)
-		s.path = s.path[:len(s.path)-1]
+		s.path = previousPath
 		if err != nil {
 			return err
 		}
@@ -187,9 +205,14 @@ func (s *jsonScanner) array(depth int) error {
 	}
 
 	for index := 0; ; index++ {
-		s.path = append(s.path, Index(index))
+		previousPath := s.path
+		childPath, pathErr := s.appendPath(Index(index), 0)
+		if pathErr != nil {
+			return pathErr
+		}
+		s.path = childPath
 		_, err := s.value(depth+1, KindArray)
-		s.path = s.path[:len(s.path)-1]
+		s.path = previousPath
 		if err != nil {
 			return err
 		}
@@ -212,6 +235,61 @@ func (s *jsonScanner) array(depth int) error {
 			return invalidJSON(s.pos, "expected ',' or ']' in array")
 		}
 	}
+}
+
+func (s *jsonScanner) appendPath(segment PathSegment, retainedStringBytes int) (int32, error) {
+	charge := retainedStringBytes
+	if len(s.paths) == cap(s.paths) {
+		newCap := nextRetainedCapacity(cap(s.paths), len(s.paths)+1)
+		charge += (newCap - cap(s.paths)) * retainedPathNodeBytes
+		if err := s.retain(charge); err != nil {
+			return rootPathRef, err
+		}
+		grown := make([]pathNode, len(s.paths), newCap)
+		copy(grown, s.paths)
+		s.paths = grown
+	} else if err := s.retain(charge); err != nil {
+		return rootPathRef, err
+	}
+	ref := int32(len(s.paths))
+	s.paths = append(s.paths, pathNode{parent: s.path, segment: segment})
+	return ref, nil
+}
+
+func (s *jsonScanner) appendString(token StringToken) error {
+	charge := len(token.Value)
+	if len(s.strings) == cap(s.strings) {
+		newCap := nextRetainedCapacity(cap(s.strings), len(s.strings)+1)
+		charge += (newCap - cap(s.strings)) * retainedStringTokenBytes
+		if err := s.retain(charge); err != nil {
+			return err
+		}
+		grown := make([]StringToken, len(s.strings), newCap)
+		copy(grown, s.strings)
+		s.strings = grown
+	} else if err := s.retain(charge); err != nil {
+		return err
+	}
+	s.strings = append(s.strings, token)
+	return nil
+}
+
+func (s *jsonScanner) retain(bytes int) error {
+	if bytes < 0 || bytes > s.limits.MaxStructuralBytes-s.structuralBytes {
+		return fmt.Errorf("%w: retained %d bytes, requested %d, max %d", ErrStructuralLimit, s.structuralBytes, bytes, s.limits.MaxStructuralBytes)
+	}
+	s.structuralBytes += bytes
+	return nil
+}
+
+func nextRetainedCapacity(current, required int) int {
+	if current == 0 {
+		current = 16
+	}
+	for current < required {
+		current *= 2
+	}
+	return current
 }
 
 // stringValue consumes and decodes a JSON string. It is used for both keys

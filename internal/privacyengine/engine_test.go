@@ -49,7 +49,7 @@ func TestEmbeddedSnapshotAndCaptureSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if result.Redacted != "alibaba=[密钥] " {
-		t.Fatalf("automatic first capture was not used: %q", result.Redacted)
+		t.Fatalf("automatic first capture was not used: redacted_len=%d findings=%d", len(result.Redacted), len(result.Findings))
 	}
 	if len(result.Findings) != 1 || result.Findings[0].RuleID != "alibaba-access-key-id" {
 		t.Fatalf("unexpected finding: %+v", result.Findings)
@@ -73,6 +73,239 @@ func TestEmbeddedSnapshotAndCaptureSelection(t *testing.T) {
 	}
 }
 
+func TestStructuredCredentialFieldsRedactWholeShortValues(t *testing.T) {
+	engine := customEngine(t, `
+[[rules]]
+id = "never"
+regex = '''NEVER_MATCH_THIS_VALUE'''
+keywords = ["NEVER_MATCH"]
+`)
+	shortValue := strings.Join([]string{"q", "7", "q", "q", "2"}, "")
+	cases := []struct {
+		name    string
+		context FieldContext
+	}{
+		{name: "AK", context: FieldContext{ImmediateKey: "AK", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "SK", context: FieldContext{ImmediateKey: "sK", ToolScope: ToolScopeOutput, Structured: true}},
+		{name: "API hyphen", context: FieldContext{ImmediateKey: "API-KEY", ToolScope: ToolScopeInput, Structured: true, Encoded: true}},
+		{name: "API camel", context: FieldContext{ImmediateKey: "apiKey", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "access key", context: FieldContext{ImmediateKey: "access_key", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "access camel", context: FieldContext{ImmediateKey: "accessKey", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "secret key", context: FieldContext{ImmediateKey: "secret-key", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "secret camel", context: FieldContext{ImmediateKey: "secretKey", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "secret access camel", context: FieldContext{ImmediateKey: "secretAccessKey", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "access key id camel", context: FieldContext{ImmediateKey: "accessKeyId", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "AWS secret access", context: FieldContext{ImmediateKey: "AWS_SECRET_ACCESS_KEY", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "AWS access id", context: FieldContext{ImmediateKey: "aws-access-key-id", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "client secret", context: FieldContext{ImmediateKey: "client_secret", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "private key", context: FieldContext{ImmediateKey: "privateKey", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "token", context: FieldContext{ImmediateKey: "TOKEN", ToolScope: ToolScopeOutput, Structured: true}},
+		{name: "access token", context: FieldContext{ImmediateKey: "access-token", ToolScope: ToolScopeOutput, Structured: true}},
+		{name: "access token camel", context: FieldContext{ImmediateKey: "accessToken", ToolScope: ToolScopeOutput, Structured: true}},
+		{name: "api token", context: FieldContext{ImmediateKey: "api_token", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "api token camel", context: FieldContext{ImmediateKey: "apiToken", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "API secret key", context: FieldContext{ImmediateKey: "apiSecretKey", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "session token", context: FieldContext{ImmediateKey: "session_token", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "ID token", context: FieldContext{ImmediateKey: "idToken", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "client token", context: FieldContext{ImmediateKey: "client_token", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "secret token", context: FieldContext{ImmediateKey: "secretToken", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "bearer token", context: FieldContext{ImmediateKey: "bearer_token", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "OAuth token", context: FieldContext{ImmediateKey: "oauthToken", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "password", context: FieldContext{ImmediateKey: "Password", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "passwd", context: FieldContext{ImmediateKey: "passwd", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "pwd", context: FieldContext{ImmediateKey: "pwd", ToolScope: ToolScopeInput, Structured: true}},
+		{name: "credential", context: FieldContext{ImmediateKey: "credential", ToolScope: ToolScopeOutput, Structured: true}},
+		{name: "secrets", context: FieldContext{ImmediateKey: "secrets", ToolScope: ToolScopeOutput, Structured: true}},
+		{name: "array ancestor", context: FieldContext{
+			Ancestors: [MaxFieldContextAncestors]string{"password"}, AncestorCount: 1,
+			ToolScope: ToolScopeInput, Structured: true,
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			input := " " + shortValue + " "
+			result, err := engine.Detect(context.Background(), input, RequestOptions{FieldContext: testCase.context})
+			if err != nil {
+				t.Fatalf("Detect: %v", err)
+			}
+			if len(result) != 1 || result[0].RuleID != ruleCredentialField ||
+				result[0].Kind != KindSecret || result[0].Start != 0 || result[0].End != len(input) {
+				t.Fatalf("credential-field finding metadata mismatch: count=%d", len(result))
+			}
+		})
+	}
+
+	credentialContext := FieldContext{ImmediateKey: "credential", ToolScope: ToolScopeInput, Structured: true}
+	for index, input := range []string{
+		strings.Join([]string{"sec", "ret"}, ""),
+		strings.Join([]string{"actual", "TODO", "7"}, ""),
+	} {
+		findings, err := engine.Detect(context.Background(), input, RequestOptions{FieldContext: credentialContext})
+		if err != nil {
+			t.Fatalf("non-template value %d: %v", index, err)
+		}
+		if len(findings) != 1 || findings[0].RuleID != ruleCredentialField {
+			t.Fatalf("non-template value %d finding mismatch: count=%d", index, len(findings))
+		}
+	}
+}
+
+func TestStructuredCredentialFieldsDoNotMatchUntrustedContextsOrPlaceholders(t *testing.T) {
+	engine := customEngine(t, `
+[[rules]]
+id = "never"
+regex = '''NEVER_MATCH_THIS_VALUE'''
+keywords = ["NEVER_MATCH"]
+`)
+	shortValue := strings.Join([]string{"q", "7", "q", "q", "2"}, "")
+	negativeContexts := []FieldContext{
+		{ImmediateKey: "monkey", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "token_id", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "api_key_name", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "secret_name", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "client_id", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "auth", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "authentication_method", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "api key", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "token", ToolScope: ToolScopeInput},
+		{ImmediateKey: "token", Structured: true},
+		{ImmediateKey: "id", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "name", ToolScope: ToolScopeOutput, Structured: true},
+		{ImmediateKey: "role", ToolScope: ToolScopeOutput, Structured: true},
+		{ImmediateKey: "signature", ToolScope: ToolScopeOutput, Structured: true},
+		{ImmediateKey: "schema", ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "value", Ancestors: [MaxFieldContextAncestors]string{"AK"}, AncestorCount: 1, ToolScope: ToolScopeInput, Structured: true},
+		{ImmediateKey: "value", Ancestors: [MaxFieldContextAncestors]string{"sk"}, AncestorCount: 1, ToolScope: ToolScopeOutput, Structured: true},
+		{ToolScope: ToolScopeInput, Structured: true},
+	}
+	for index, fieldContext := range negativeContexts {
+		findings, err := engine.Detect(context.Background(), shortValue, RequestOptions{FieldContext: fieldContext})
+		if err != nil {
+			t.Fatalf("negative context %d: %v", index, err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("negative context %d produced %d findings", index, len(findings))
+		}
+	}
+
+	credentialContext := FieldContext{ImmediateKey: "api_key", ToolScope: ToolScopeInput, Structured: true}
+	placeholders := []string{
+		"", "   ", "${API_KEY}", "$API_KEY", "$env:API_KEY", "$(API_KEY)",
+		"{{API_KEY}}", "${{ secrets.API_KEY }}", "%API_KEY%", "<API_KEY>",
+		"[密钥]", "[密钥#2]", "[邮箱]", "[电话#2]", "[身份证]", "[银行卡]", "[IP#2]",
+		"[REDACTED]", "YOUR_API_KEY", "******", "xxxx",
+	}
+	for index, placeholder := range placeholders {
+		findings, err := engine.Detect(context.Background(), placeholder, RequestOptions{FieldContext: credentialContext})
+		if err != nil {
+			t.Fatalf("placeholder %d: %v", index, err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("placeholder %d produced %d findings", index, len(findings))
+		}
+	}
+
+	embedded, _ := embeddedEngine(t)
+	for index, placeholder := range placeholders {
+		findings, err := embedded.Detect(context.Background(), placeholder, RequestOptions{FieldContext: credentialContext})
+		if err != nil {
+			t.Fatalf("embedded placeholder %d: %v", index, err)
+		}
+		if len(findings) != 0 {
+			t.Fatalf("embedded placeholder %d produced %d findings", index, len(findings))
+		}
+	}
+}
+
+func TestCredentialPlaceholderLikeWrappersDoNotBypassWholeValueRedaction(t *testing.T) {
+	engine := customEngine(t, `
+[[rules]]
+id = "never"
+regex = '''NEVER_MATCH_THIS_VALUE'''
+keywords = ["NEVER_MATCH"]
+`)
+	fieldContext := FieldContext{ImmediateKey: "api_key", ToolScope: ToolScopeInput, Structured: true}
+	values := []string{
+		"{{" + strings.Join([]string{"sk", "live", "real", "secret"}, "-") + "}}",
+		"<" + strings.Join([]string{"Super", "Secret", "123!"}, "") + ">",
+		"YOUR_" + strings.Join([]string{"Super", "Secret", "123"}, ""),
+		"$(" + strings.Join([]string{"secret", "value"}, "-") + ")",
+		"REPLACE_WITH_" + strings.Join([]string{"live", "value"}, "_"),
+	}
+	for index, value := range values {
+		findings, err := engine.Detect(context.Background(), value, RequestOptions{FieldContext: fieldContext})
+		if err != nil {
+			t.Fatalf("placeholder-like credential %d: %v", index, err)
+		}
+		if len(findings) != 1 || findings[0].RuleID != ruleCredentialField ||
+			findings[0].Start != 0 || findings[0].End != len(value) {
+			t.Fatalf("placeholder-like credential %d finding mismatch: count=%d", index, len(findings))
+		}
+	}
+}
+
+func TestCredentialPlaceholderStillRunsGenericSecretDetectors(t *testing.T) {
+	engine, _ := embeddedEngine(t)
+	credential := strings.Join([]string{"AKIA", "IOSFODNN7EXAMPLF"}, "")
+	value := "${" + credential + "}"
+	findings, err := engine.Detect(context.Background(), value, RequestOptions{FieldContext: FieldContext{
+		ImmediateKey: "api_key",
+		ToolScope:    ToolScopeInput,
+		Structured:   true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].RuleID != "aws-access-token" {
+		t.Fatalf("generic secret detector finding mismatch: count=%d", len(findings))
+	}
+}
+
+func TestPreservedConfiguredPlaceholderStillConsumesBudget(t *testing.T) {
+	engine := customEngine(t, `
+[[rules]]
+id = "never"
+regex = '''NEVER_MATCH_THIS_VALUE'''
+keywords = ["NEVER_MATCH"]
+`)
+	budget, err := NewBudget(Limits{MaxBytes: 32, MaxNodes: 1, MaxFindings: 1})
+	if err != nil {
+		t.Fatalf("NewBudget: %v", err)
+	}
+	findings, err := engine.Detect(context.Background(), "[CUSTOM]", RequestOptions{
+		Budget:              budget,
+		PreservePlaceholder: true,
+	})
+	if err != nil || len(findings) != 0 {
+		t.Fatalf("preserved placeholder = findings %d, err %v", len(findings), err)
+	}
+	if _, err = engine.Detect(context.Background(), "x", RequestOptions{Budget: budget}); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("second Detect error = %v, want ErrBudgetExceeded", err)
+	}
+}
+
+func TestCredentialFieldMetadataPrecedesContainedPII(t *testing.T) {
+	engine := customEngine(t, `
+[[rules]]
+id = "never"
+regex = '''NEVER_MATCH_THIS_VALUE'''
+keywords = ["NEVER_MATCH"]
+`)
+	input := strings.Join([]string{"person", "@", "example", ".", "com"}, "")
+	findings, err := engine.Detect(context.Background(), input, RequestOptions{FieldContext: FieldContext{
+		ImmediateKey: "credential",
+		ToolScope:    ToolScopeOutput,
+		Structured:   true,
+	}})
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if len(findings) != 1 || findings[0].RuleID != ruleCredentialField ||
+		findings[0].Start != 0 || findings[0].End != len(input) {
+		t.Fatalf("credential field did not retain whole-value metadata: count=%d", len(findings))
+	}
+}
+
 func TestIssue3OverlapRegression(t *testing.T) {
 	engine, _ := embeddedEngine(t)
 	const input = "api keyABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -81,7 +314,7 @@ func TestIssue3OverlapRegression(t *testing.T) {
 		t.Fatalf("Redact overlap input: %v", err)
 	}
 	if !result.Hit() || !strings.Contains(result.Redacted, "[密钥]") {
-		t.Fatalf("overlap input was not safely redacted: %+v", result)
+		t.Fatalf("overlap input was not safely redacted: hit=%t redacted_len=%d findings=%d", result.Hit(), len(result.Redacted), len(result.Findings))
 	}
 }
 
@@ -182,7 +415,7 @@ keywords = ["NEVER_MATCH"]
 		t.Fatal(err)
 	}
 	if second.Redacted != first.Redacted || second.Hit() {
-		t.Fatalf("redaction is not idempotent: first=%q second=%+v", first.Redacted, second)
+		t.Fatalf("redaction is not idempotent: first_len=%d second_len=%d second_findings=%d", len(first.Redacted), len(second.Redacted), len(second.Findings))
 	}
 }
 
@@ -215,10 +448,10 @@ stopwords = ["permit"]
 	} {
 		findings, err := engine.Detect(context.Background(), input, RequestOptions{})
 		if err != nil {
-			t.Fatalf("Detect(%q): %v", input, err)
+			t.Fatalf("Detect input_len=%d: %v", len(input), err)
 		}
 		if len(findings) != 0 {
-			t.Errorf("allowlist failed for %q: %+v", input, findings)
+			t.Errorf("allowlist failed for input_len=%d: findings=%d", len(input), len(findings))
 		}
 	}
 
@@ -319,6 +552,6 @@ regex = '''NEVER_MATCH'''
 		t.Fatal(err)
 	}
 	if seenPlaintext != "a@example.com" || result.Redacted != "mail <email>" {
-		t.Fatalf("request renderer: plaintext=%q result=%+v", seenPlaintext, result)
+		t.Fatalf("request renderer mismatch: plaintext_len=%d redacted_len=%d findings=%d", len(seenPlaintext), len(result.Redacted), len(result.Findings))
 	}
 }

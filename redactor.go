@@ -9,9 +9,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/internal/privacyengine"
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
-	"github.com/rheodev/cpa-plugin-privacyfilter/walker"
+	"github.com/ahoo/cpa-plugin-privacyfilter/internal/privacyengine"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/walker"
 )
 
 type sanitizeResult struct {
@@ -24,18 +24,83 @@ type sanitizeResult struct {
 	unsupported int
 }
 
+type requestInspectionBudget struct {
+	engine          *privacyengine.Budget
+	limits          payload.Limits
+	jsonNodes       int
+	structuralBytes int
+}
+
+const maxEncodedJSONNesting = 4
+
+func newRequestInspectionBudget(
+	engine *privacyengine.Budget,
+	limits payload.Limits,
+	initialNodes int,
+	initialStructuralBytes int,
+) (*requestInspectionBudget, error) {
+	normalized, err := limits.Normalized()
+	if err != nil {
+		return nil, err
+	}
+	if engine == nil {
+		return nil, privacyengine.ErrInternalFailure
+	}
+	if initialNodes < 0 || initialStructuralBytes < 0 {
+		return nil, privacyengine.ErrInternalFailure
+	}
+	if initialNodes > normalized.MaxNodes {
+		return nil, fmt.Errorf("%w: cumulative JSON nodes exceed request limit", payload.ErrNodeLimit)
+	}
+	if initialStructuralBytes > normalized.MaxStructuralBytes {
+		return nil, fmt.Errorf("%w: cumulative structure exceeds request limit", payload.ErrStructuralLimit)
+	}
+	return &requestInspectionBudget{
+		engine:          engine,
+		limits:          normalized,
+		jsonNodes:       initialNodes,
+		structuralBytes: initialStructuralBytes,
+	}, nil
+}
+
+func (b *requestInspectionBudget) scanEncodedJSON(ctx context.Context, text string) (*payload.Document, error) {
+	if b == nil || b.engine == nil {
+		return nil, privacyengine.ErrInternalFailure
+	}
+	remainingNodes := b.limits.MaxNodes - b.jsonNodes
+	if remainingNodes <= 0 {
+		return nil, fmt.Errorf("%w: cumulative JSON node budget exhausted", payload.ErrNodeLimit)
+	}
+	remainingStructural := b.limits.MaxStructuralBytes - b.structuralBytes
+	if remainingStructural <= 0 {
+		return nil, fmt.Errorf("%w: cumulative structural budget exhausted", payload.ErrStructuralLimit)
+	}
+	scanLimits := b.limits
+	scanLimits.MaxNodes = remainingNodes
+	scanLimits.MaxStructuralBytes = remainingStructural
+	document, err := payload.Scan(ctx, []byte(text), payload.ScanOptions{Limits: scanLimits})
+	if err != nil {
+		return nil, err
+	}
+	b.jsonNodes += document.NodeCount()
+	b.structuralBytes += document.StructuralBytes()
+	return document, nil
+}
+
 type requestRenderer struct {
-	mu   sync.Mutex
-	base privacyengine.Renderer
-	seen map[[sha256.Size]byte]string
-	next map[privacyengine.Kind]int
+	mu       sync.Mutex
+	base     privacyengine.Renderer
+	seen     map[[sha256.Size]byte]string
+	produced map[[sha256.Size]byte]struct{}
+	next     map[privacyengine.Kind]int
 }
 
 func newRequestRenderer(base privacyengine.Renderer) *requestRenderer {
 	return &requestRenderer{
-		base: base,
-		seen: make(map[[sha256.Size]byte]string),
-		next: make(map[privacyengine.Kind]int),
+		base:     base,
+		seen:     make(map[[sha256.Size]byte]string),
+		produced: make(map[[sha256.Size]byte]struct{}),
+		next:     make(map[privacyengine.Kind]int),
 	}
 }
 
@@ -53,7 +118,19 @@ func (r *requestRenderer) Render(ctx context.Context, finding privacyengine.Find
 	r.next[finding.Kind]++
 	replacement := numberedPlaceholder(base, r.next[finding.Kind])
 	r.seen[key] = replacement
+	r.produced[sha256.Sum256([]byte(replacement))] = struct{}{}
 	return replacement, nil
+}
+
+func (r *requestRenderer) producedPlaceholder(value string) bool {
+	if r == nil {
+		return false
+	}
+	hash := sha256.Sum256([]byte(value))
+	r.mu.Lock()
+	_, ok := r.produced[hash]
+	r.mu.Unlock()
+	return ok
 }
 
 func numberedPlaceholder(base string, number int) string {
@@ -100,6 +177,15 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 	if err != nil {
 		return result, err
 	}
+	inspectionBudget, err := newRequestInspectionBudget(
+		budget,
+		p.cfg.payloadLimits(),
+		walked.JSONNodes,
+		walked.StructuralBytes,
+	)
+	if err != nil {
+		return result, err
+	}
 	if renderer == nil {
 		renderer = newRequestRenderer(p.renderer)
 	}
@@ -108,7 +194,7 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 		if err := ctx.Err(); err != nil {
 			return result, err
 		}
-		value, findings, changed, err := p.sanitizeTarget(ctx, target, budget, renderer)
+		value, findings, changed, err := p.sanitizeTarget(ctx, target, inspectionBudget, renderer)
 		if err != nil {
 			return result, err
 		}
@@ -134,16 +220,25 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 func (p *privacyFilterPlugin) sanitizeTarget(
 	ctx context.Context,
 	target walker.Target,
-	budget *privacyengine.Budget,
+	budget *requestInspectionBudget,
 	renderer privacyengine.Renderer,
 ) (string, int, bool, error) {
+	if budget == nil {
+		return target.Token.Value, 0, false, privacyengine.ErrInternalFailure
+	}
 	switch target.Mutable {
 	case walker.MutabilityDirect:
-		return p.sanitizeText(ctx, target.Token.Value, budget, renderer)
+		return p.sanitizeText(
+			ctx,
+			target.Token.Value,
+			budget.engine,
+			renderer,
+			engineFieldContext(target.Context),
+		)
 	case walker.MutabilityEncodedJSON:
-		return p.sanitizeJSONText(ctx, target.Token.Value, budget, renderer, false)
+		return p.sanitizeJSONTextWithBudget(ctx, target.Token.Value, budget, renderer, target.Context, false, 0)
 	case walker.MutabilityJSONOrPlain:
-		return p.sanitizeJSONText(ctx, target.Token.Value, budget, renderer, true)
+		return p.sanitizeJSONTextWithBudget(ctx, target.Token.Value, budget, renderer, target.Context, true, 0)
 	default:
 		return target.Token.Value, 0, false, fmt.Errorf("%w: invalid target mutability", errUnsupportedRequestShape)
 	}
@@ -154,19 +249,109 @@ func (p *privacyFilterPlugin) sanitizeJSONText(
 	text string,
 	budget *privacyengine.Budget,
 	renderer privacyengine.Renderer,
+	outerContext walker.TargetContext,
 	allowPlain bool,
 ) (string, int, bool, error) {
-	document, err := payload.Scan(ctx, []byte(text), payload.ScanOptions{Limits: p.cfg.payloadLimits()})
+	inspectionBudget, err := newRequestInspectionBudget(budget, p.cfg.payloadLimits(), 0, 0)
+	if err != nil {
+		return text, 0, false, err
+	}
+	return p.sanitizeJSONTextWithBudget(ctx, text, inspectionBudget, renderer, outerContext, allowPlain, 0)
+}
+
+func (p *privacyFilterPlugin) sanitizeJSONTextWithLimits(
+	ctx context.Context,
+	text string,
+	budget *privacyengine.Budget,
+	renderer privacyengine.Renderer,
+	outerContext walker.TargetContext,
+	allowPlain bool,
+	limits payload.Limits,
+) (string, int, bool, error) {
+	inspectionBudget, err := newRequestInspectionBudget(budget, limits, 0, 0)
+	if err != nil {
+		return text, 0, false, err
+	}
+	return p.sanitizeJSONTextWithBudget(ctx, text, inspectionBudget, renderer, outerContext, allowPlain, 0)
+}
+
+func (p *privacyFilterPlugin) sanitizeJSONTextWithBudget(
+	ctx context.Context,
+	text string,
+	budget *requestInspectionBudget,
+	renderer privacyengine.Renderer,
+	outerContext walker.TargetContext,
+	allowPlain bool,
+	nesting int,
+) (string, int, bool, error) {
+	if budget == nil || budget.engine == nil {
+		return text, 0, false, privacyengine.ErrInternalFailure
+	}
+	fieldContext := engineFieldContext(outerContext)
+	if privacyengine.CredentialFieldApplies(fieldContext) {
+		return p.sanitizeText(ctx, text, budget.engine, renderer, fieldContext)
+	}
+	sanitizePlain := func() (string, int, bool, error) {
+		plainContext := fieldContext
+		if !outerContext.Structured {
+			plainContext.Structured = false
+			plainContext.Encoded = false
+		}
+		return p.sanitizeText(ctx, text, budget.engine, renderer, plainContext)
+	}
+	if allowPlain && !looksLikeEncodedJSONContainer(text) {
+		return sanitizePlain()
+	}
+
+	document, err := budget.scanEncodedJSON(ctx, text)
 	if err != nil {
 		if allowPlain && errors.Is(err, payload.ErrInvalidJSON) {
-			return p.sanitizeText(ctx, text, budget, renderer)
+			return sanitizePlain()
 		}
-		return text, 0, false, fmt.Errorf("%w: encoded tool JSON", errUnsupportedRequestShape)
+		return text, 0, false, fmt.Errorf("%w: encoded tool JSON: %w", errUnsupportedRequestShape, err)
 	}
-	replacements := make([]payload.Replacement, 0, len(document.Strings()))
+	if nesting > maxEncodedJSONNesting {
+		return text, 0, false, fmt.Errorf("%w: encoded tool JSON: %w", errUnsupportedRequestShape, payload.ErrDepthLimit)
+	}
+
+	replacements := make([]payload.Replacement, 0, document.StringCount())
 	findingCount := 0
-	for _, token := range document.Strings() {
-		out, findings, changed, err := p.sanitizeText(ctx, token.Value, budget, renderer)
+	for index := 0; index < document.StringCount(); index++ {
+		token, ok := document.StringTokenAt(index)
+		if !ok {
+			return text, 0, false, errors.New("privacy filter: encoded JSON token index is unavailable")
+		}
+		fields, ok := document.StringKeyContextAt(index)
+		if !ok {
+			return text, 0, false, errors.New("privacy filter: encoded JSON field context is unavailable")
+		}
+		innerContext := outerContext
+		innerContext.Fields = mergeStringKeyContexts(fields, outerContext.Fields)
+		innerContext.Structured = true
+		innerContext.Encoded = true
+
+		var out string
+		var findings int
+		var changed bool
+		if looksLikeEncodedJSONContainer(token.Value) {
+			out, findings, changed, err = p.sanitizeJSONTextWithBudget(
+				ctx,
+				token.Value,
+				budget,
+				renderer,
+				innerContext,
+				true,
+				nesting+1,
+			)
+		} else {
+			out, findings, changed, err = p.sanitizeText(
+				ctx,
+				token.Value,
+				budget.engine,
+				renderer,
+				engineFieldContext(innerContext),
+			)
+		}
 		if err != nil {
 			return text, 0, false, err
 		}
@@ -185,16 +370,89 @@ func (p *privacyFilterPlugin) sanitizeJSONText(
 	return string(out), findingCount, changed, nil
 }
 
+func mergeStringKeyContexts(inner, outer payload.StringKeyContext) payload.StringKeyContext {
+	merged := payload.StringKeyContext{ImmediateKey: inner.ImmediateKey}
+	hasCredentialAncestorKey := func() bool {
+		if privacyengine.IsCredentialAncestorFieldKey(merged.ImmediateKey) {
+			return true
+		}
+		for index := 0; index < int(merged.AncestorCount); index++ {
+			if privacyengine.IsCredentialAncestorFieldKey(merged.Ancestors[index]) {
+				return true
+			}
+		}
+		return false
+	}
+	appendAncestor := func(key string) {
+		if key == "" {
+			return
+		}
+		if int(merged.AncestorCount) >= len(merged.Ancestors) {
+			if privacyengine.IsCredentialAncestorFieldKey(key) && !hasCredentialAncestorKey() {
+				merged.Ancestors[len(merged.Ancestors)-1] = key
+			}
+			return
+		}
+		merged.Ancestors[merged.AncestorCount] = key
+		merged.AncestorCount++
+	}
+	innerCount := int(inner.AncestorCount)
+	if innerCount > len(inner.Ancestors) {
+		innerCount = len(inner.Ancestors)
+	}
+	for index := 0; index < innerCount; index++ {
+		appendAncestor(inner.Ancestors[index])
+	}
+	appendAncestor(outer.ImmediateKey)
+	outerCount := int(outer.AncestorCount)
+	if outerCount > len(outer.Ancestors) {
+		outerCount = len(outer.Ancestors)
+	}
+	for index := 0; index < outerCount; index++ {
+		appendAncestor(outer.Ancestors[index])
+	}
+	return merged
+}
+
+func looksLikeEncodedJSONContainer(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")
+}
+
+func engineFieldContext(context walker.TargetContext) privacyengine.FieldContext {
+	fieldContext := privacyengine.FieldContext{
+		ImmediateKey:  context.Fields.ImmediateKey,
+		AncestorCount: context.Fields.AncestorCount,
+		Structured:    context.Structured,
+		Encoded:       context.Encoded,
+	}
+	copy(fieldContext.Ancestors[:], context.Fields.Ancestors[:])
+	switch context.ToolScope {
+	case walker.ScopeToolInput:
+		fieldContext.ToolScope = privacyengine.ToolScopeInput
+	case walker.ScopeToolOutput:
+		fieldContext.ToolScope = privacyengine.ToolScopeOutput
+	}
+	return fieldContext
+}
+
 func (p *privacyFilterPlugin) sanitizeText(
 	ctx context.Context,
 	text string,
 	budget *privacyengine.Budget,
 	renderer privacyengine.Renderer,
+	fieldContext privacyengine.FieldContext,
 ) (string, int, bool, error) {
+	preservePlaceholder := false
+	if requestRenderer, ok := renderer.(*requestRenderer); ok {
+		preservePlaceholder = requestRenderer.producedPlaceholder(text)
+	}
 	result, err := p.engine.Redact(ctx, text, privacyengine.RequestOptions{
-		Budget:           budget,
-		Renderer:         renderer,
-		PreferredRuleIDs: p.blockRuleIDs,
+		Budget:              budget,
+		Renderer:            renderer,
+		PreferredRuleIDs:    p.blockRuleIDs,
+		FieldContext:        fieldContext,
+		PreservePlaceholder: preservePlaceholder,
 	})
 	if err != nil {
 		return text, 0, false, err

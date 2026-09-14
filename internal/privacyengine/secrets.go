@@ -39,9 +39,12 @@ var urlPrefixes = []string{
 }
 
 var (
-	reTemplateVar = regexp.MustCompile(`^(?:\{\{[^{}]+\}\}|\$\{[^{}]+\}|%\{[^{}]+\}|<[^<>]+>)$`)
-	reUUID        = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
-	reHexOnly     = regexp.MustCompile(`^[0-9a-fA-F]+$`)
+	reTemplateVar           = regexp.MustCompile(`^(?:\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}|\$\{\{\s*(?i:secrets)\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$\([A-Za-z_][A-Za-z0-9_]*\)|%\{[A-Za-z_][A-Za-z0-9_]*\}|<[A-Za-z_][A-Za-z0-9_]*>)$`)
+	reSimpleVar             = regexp.MustCompile(`(?i)^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$env:[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)$`)
+	reCredentialPlaceholder = regexp.MustCompile(`(?i)^(?:(?:redacted|masked|hidden)(?:#[0-9]+)?|\[(?:redacted|masked|hidden|secret|credential|api[_ -]?key|邮箱|电话|身份证|银行卡|ip|密钥)(?:#[0-9]+)?\])$`)
+	reMaskOnly              = regexp.MustCompile(`^[*xX._-]{3,}$`)
+	reUUID                  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	reHexOnly               = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 )
 
 var benignIDSuffixes = []string{"_id", "_uuid", "_uid", "_oid", "_no", "_seq"}
@@ -151,6 +154,136 @@ func (e *Engine) detectSecrets(ctx context.Context, text string, collector *span
 		}
 		return collector.add(span{start: start, end: end, kind: KindSecret, ruleID: ruleHighEntropy})
 	})
+}
+
+func detectCredentialField(text string, collector *spanCollector, fieldContext FieldContext) error {
+	if !credentialFieldApplies(fieldContext) || isCredentialPlaceholder(text) {
+		return nil
+	}
+	return collector.add(span{
+		start:  0,
+		end:    len(text),
+		kind:   KindSecret,
+		ruleID: ruleCredentialField,
+	})
+}
+
+func credentialFieldApplies(fieldContext FieldContext) bool {
+	if !fieldContext.Structured ||
+		(fieldContext.ToolScope != ToolScopeInput && fieldContext.ToolScope != ToolScopeOutput) {
+		return false
+	}
+	if isCredentialFieldKey(fieldContext.ImmediateKey) {
+		return true
+	}
+	count := int(fieldContext.AncestorCount)
+	if count > len(fieldContext.Ancestors) {
+		count = len(fieldContext.Ancestors)
+	}
+	for i := 0; i < count; i++ {
+		if isCredentialAncestorFieldKey(fieldContext.Ancestors[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// CredentialFieldApplies reports whether the bounded structured context selects
+// whole-value credential redaction. The abbreviated AK and SK names apply only
+// as immediate keys because they are common non-credential container fields.
+func CredentialFieldApplies(fieldContext FieldContext) bool {
+	return credentialFieldApplies(fieldContext)
+}
+
+func isCredentialFieldKey(key string) bool {
+	switch normalizeCredentialFieldKey(key) {
+	case "ak", "sk", "api_key", "apikey", "api_secret", "apisecret",
+		"api_secret_key", "apisecretkey",
+		"access_key", "accesskey", "access_key_id", "accesskeyid",
+		"secret_key", "secretkey", "secret_access_key", "secretaccesskey",
+		"aws_access_key_id", "awsaccesskeyid", "aws_secret_access_key", "awssecretaccesskey",
+		"client_secret", "clientsecret", "private_key", "privatekey",
+		"token", "access_token", "accesstoken", "api_token", "apitoken",
+		"auth_token", "authtoken", "refresh_token", "refreshtoken",
+		"session_token", "sessiontoken", "id_token", "idtoken",
+		"client_token", "clienttoken", "secret_token", "secrettoken",
+		"bearer_token", "bearertoken", "oauth_token", "oauthtoken",
+		"password", "passwd", "pwd", "credential", "secret", "secrets", "authorization":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCredentialAncestorFieldKey(key string) bool {
+	normalized := normalizeCredentialFieldKey(key)
+	return normalized != "ak" && normalized != "sk" && isCredentialFieldKey(normalized)
+}
+
+// IsCredentialFieldKey reports whether key is an exact high-confidence
+// immediate credential field name after the engine's bounded normalization.
+func IsCredentialFieldKey(key string) bool {
+	return isCredentialFieldKey(key)
+}
+
+// IsCredentialAncestorFieldKey reports whether key is sufficiently unambiguous
+// to propagate whole-value credential handling to descendant strings.
+func IsCredentialAncestorFieldKey(key string) bool {
+	return isCredentialAncestorFieldKey(key)
+}
+
+func normalizeCredentialFieldKey(key string) string {
+	if key == "" || len(key) > 64 {
+		return ""
+	}
+	changed := false
+	for index := 0; index < len(key); index++ {
+		char := key[index]
+		switch {
+		case char >= 'A' && char <= 'Z', char == '-':
+			changed = true
+		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '_':
+		default:
+			return ""
+		}
+	}
+	if !changed {
+		return key
+	}
+	var normalized strings.Builder
+	normalized.Grow(len(key))
+	for index := 0; index < len(key); index++ {
+		char := key[index]
+		switch {
+		case char >= 'A' && char <= 'Z':
+			normalized.WriteByte(char + ('a' - 'A'))
+		case char == '-':
+			normalized.WriteByte('_')
+		default:
+			normalized.WriteByte(char)
+		}
+	}
+	return normalized.String()
+}
+
+func isCredentialPlaceholder(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == "" ||
+		isTemplateVar(trimmed) ||
+		reSimpleVar.MatchString(trimmed) ||
+		reCredentialPlaceholder.MatchString(trimmed) ||
+		reMaskOnly.MatchString(trimmed) ||
+		isExactCommonPlaceholder(trimmed)
+}
+
+func isExactCommonPlaceholder(value string) bool {
+	upper := strings.ToUpper(value)
+	for _, placeholder := range commonPlaceholders {
+		if upper == placeholder {
+			return true
+		}
+	}
+	return false
 }
 
 func looksLikeURLMatch(value string) bool {

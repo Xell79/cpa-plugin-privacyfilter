@@ -1,13 +1,20 @@
 package walker
 
-import (
-	"fmt"
+import "github.com/ahoo/cpa-plugin-privacyfilter/payload"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
-)
+var interactionsRootControlFields = []string{
+	"model", "agent", "agent_config", "background", "environment", "labels", "previous_interaction_id",
+	"previous_response_id", "response_format", "response_mime_type", "response_modalities", "safety_settings",
+	"service_tier", "store", "stream", "generation_config", "generationConfig", "webhook_config",
+	"tool_choice", "ToolChoice", "parallel_tool_calls", "seed", "user", "metadata", "include", "truncation",
+	"reasoning", "environment_id",
+}
 
 func walkInteractions(c *collector, root *node) error {
-	if err := c.unique(root, "system_instruction", "systemInstruction", "input", "steps"); err != nil {
+	if err := c.unique(root, "system_instruction", "systemInstruction", "input", "steps", "tools"); err != nil {
+		return err
+	}
+	if err := c.markFields(root, interactionsRootControlFields...); err != nil {
 		return err
 	}
 	system, _, hasSystem, err := c.oneOf(root, "system_instruction", "systemInstruction")
@@ -42,6 +49,55 @@ func walkInteractions(c *collector, root *node) error {
 			}
 		}
 	}
+	return walkInteractionsToolDefinitions(c, root)
+}
+
+func markInteractionsOpaqueStringFields(c *collector, object *node, keys ...string) error {
+	for _, key := range keys {
+		if err := c.markOpaqueStringField(object, key, false, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func walkInteractionsToolDefinitions(c *collector, root *node) error {
+	tools, present, err := c.field(root, "tools")
+	if err != nil || !present {
+		return err
+	}
+	if tools.kind != payload.KindArray {
+		return c.shape(tools, "array", "tools")
+	}
+	for _, tool := range tools.array {
+		if tool.kind != payload.KindObject {
+			c.unsupported(tool, "tool definition is not an object")
+			continue
+		}
+		if err = c.unique(tool, "type", "name", "description", "parameters", "strict", "defer_loading"); err != nil {
+			return err
+		}
+		typeNode, _, fieldErr := c.stringField(tool, "type", true)
+		if fieldErr != nil {
+			return fieldErr
+		}
+		if err = c.markOpaque(typeNode); err != nil {
+			return err
+		}
+		if typeNode.token.Value != "function" {
+			c.unsupportedValue(tool, "unknown tool definition type ", typeNode.token.Value)
+			continue
+		}
+		if err = c.markOpaqueStringField(tool, "name", true, false); err != nil {
+			return err
+		}
+		if err = c.addStringField(tool, "description", false, true, ScopeSystem, TargetKindNaturalText); err != nil {
+			return err
+		}
+		if err = c.walkStringObjectField(tool, "parameters", true, false, ScopeSystem); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -53,7 +109,7 @@ func walkInteractionsSystem(c *collector, system *node) error {
 		if err := c.unique(system, "text", "parts", "content", "role", "type", "id", "name", "signature"); err != nil {
 			return err
 		}
-		if err := c.markFields(system, "role", "type", "id", "name", "signature"); err != nil {
+		if err := markInteractionsOpaqueStringFields(c, system, "role", "type", "id", "name", "signature"); err != nil {
 			return err
 		}
 		text, hasText, err := c.stringField(system, "text", false)
@@ -114,14 +170,14 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		return nil
 	}
 	controls := []string{
-		"type", "role", "steps", "content", "parts", "text", "arguments", "result", "output",
+		"type", "role", "steps", "content", "parts", "text", "summary", "arguments", "result", "output",
 		"thought", "thinking", "redacted_thinking", "signature", "thoughtSignature", "thought_signature",
 		"id", "name", "call_id", "tool_use_id", "model",
 	}
 	if err := c.unique(item, controls...); err != nil {
 		return err
 	}
-	if err := c.markFields(item, "thought", "thinking", "redacted_thinking", "signature", "thoughtSignature", "thought_signature", "id", "name", "call_id", "tool_use_id", "model"); err != nil {
+	if err := markInteractionsOpaqueStringFields(c, item, "signature", "thoughtSignature", "thought_signature", "id", "name", "call_id", "tool_use_id", "model"); err != nil {
 		return err
 	}
 
@@ -175,6 +231,9 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		_, err = walkInteractionNaturalFields(c, item, ScopeUser, true)
 		return err
 	case "model_output":
+		if err = walkInteractionsOpaqueReasoningFields(c, item); err != nil {
+			return err
+		}
 		if !roleOK {
 			return nil
 		}
@@ -186,7 +245,11 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		_, err = walkInteractionNaturalFields(c, item, ScopeAssistant, true)
 		return err
 	case "thought", "reasoning":
-		return c.markOpaque(item)
+		if err = walkInteractionsOpaqueReasoningFields(c, item); err != nil {
+			return err
+		}
+		_, err = walkInteractionNaturalFields(c, item, ScopeAssistant, true)
+		return err
 	case "function_call":
 		arguments, ok, fieldErr := c.field(item, "arguments")
 		if fieldErr != nil {
@@ -231,11 +294,34 @@ func walkInteractionItem(c *collector, item *node, inherited Scope) error {
 		}
 		return c.add(text, textScope, TargetKindNaturalText, MutabilityDirect)
 	case "image", "audio", "video", "document", "file", "computer_call", "web_search_call", "file_search_call", "image_generation_call":
-		return c.markOpaque(item)
+		c.unsupported(item, "typed interaction item is not safely mutable")
+		return nil
 	default:
-		c.unsupported(item, fmt.Sprintf("unknown step type %q", itemType))
+		c.unsupportedValue(item, "unknown step type ", itemType)
 		return nil
 	}
+}
+
+func walkInteractionsOpaqueReasoningFields(c *collector, item *node) error {
+	for _, key := range []string{"thought", "thinking", "redacted_thinking"} {
+		value, present, err := c.field(item, key)
+		if err != nil || !present || value.kind == payload.KindNull {
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		switch value.kind {
+		case payload.KindString:
+			if err = c.markOpaque(value); err != nil {
+				return err
+			}
+		case payload.KindBoolean:
+		default:
+			c.unsupported(value, "structured reasoning integrity field is not admitted")
+		}
+	}
+	return nil
 }
 
 func walkInteractionSteps(c *collector, steps *node, scope Scope) error {
@@ -263,7 +349,7 @@ func interactionRoleScope(c *collector, item *node, inherited Scope) (Scope, boo
 	}
 	scope, known := scopeForRole(role.token.Value)
 	if !known {
-		c.unsupported(role, fmt.Sprintf("unknown step role %q", role.token.Value))
+		c.unsupportedValue(role, "unknown step role ", role.token.Value)
 		return inherited, false, nil
 	}
 	return scope, true, nil
@@ -303,6 +389,18 @@ func walkInteractionNaturalFields(c *collector, item *node, scope Scope, roleOK 
 		processed = true
 		if roleOK {
 			if err = c.add(text, scope, TargetKindNaturalText, MutabilityDirect); err != nil {
+				return false, err
+			}
+		}
+	}
+	summary, hasSummary, err := c.field(item, "summary")
+	if err != nil {
+		return false, err
+	}
+	if hasSummary {
+		processed = true
+		if roleOK {
+			if err = walkInteractionsNaturalContent(c, summary, scope); err != nil {
 				return false, err
 			}
 		}
@@ -350,11 +448,18 @@ func walkInteractionsPart(c *collector, part *node, scope Scope) error {
 		c.unsupported(part, "content part is neither string nor object")
 		return nil
 	}
-	if err := c.unique(part, "type", "text", "content", "thought", "thinking", "signature", "thoughtSignature", "thought_signature", "id", "name", "call_id", "data", "url", "file_uri", "fileUri", "mime_type", "mimeType"); err != nil {
+	if err := c.unique(
+		part,
+		"type", "text", "content", "summary", "thought", "thinking", "signature", "thoughtSignature",
+		"thought_signature", "id", "name", "call_id", "data", "url", "file_uri", "fileUri", "file_id",
+		"file_data", "filename", "image_url", "mime_type", "mimeType", "annotations",
+	); err != nil {
 		return err
 	}
-	if err := c.markFields(part, "thought", "thinking", "signature", "thoughtSignature", "thought_signature", "id", "name", "call_id"); err != nil {
-		return err
+	for _, key := range []string{"signature", "thoughtSignature", "thought_signature", "id", "call_id"} {
+		if err := c.markOpaqueStringField(part, key, false, true); err != nil {
+			return err
+		}
 	}
 	typeNode, hasType, err := c.stringField(part, "type", false)
 	if err != nil {
@@ -376,15 +481,53 @@ func walkInteractionsPart(c *collector, part *node, scope Scope) error {
 	}
 	switch partType := typeNode.token.Value; partType {
 	case "text", "input_text", "output_text":
+		if err = c.markOpaqueStringField(part, "name", false, true); err != nil {
+			return err
+		}
+		annotations, hasAnnotations, fieldErr := c.field(part, "annotations")
+		if fieldErr != nil {
+			return fieldErr
+		}
+		if hasAnnotations && annotations.kind != payload.KindNull {
+			if annotations.kind != payload.KindArray {
+				return c.shape(annotations, "array or null", "annotations")
+			}
+			if len(annotations.array) != 0 {
+				c.unsupported(annotations, "text annotations are integrity-coupled")
+			}
+		}
 		text, _, textErr := c.stringField(part, "text", true)
 		if textErr != nil {
 			return textErr
 		}
 		return c.add(text, scope, TargetKindNaturalText, MutabilityDirect)
-	case "thought", "reasoning", "image", "audio", "video", "document", "file", "input_image", "output_image", "input_audio":
-		return c.markOpaque(part)
+	case "thought", "reasoning":
+		if err = walkInteractionsOpaqueReasoningFields(c, part); err != nil {
+			return err
+		}
+		processed := false
+		for _, key := range []string{"text", "content", "summary"} {
+			value, present, fieldErr := c.field(part, key)
+			if fieldErr != nil {
+				return fieldErr
+			}
+			if present {
+				processed = true
+				if err = walkInteractionsNaturalContent(c, value, ScopeAssistant); err != nil {
+					return err
+				}
+			}
+		}
+		if !processed {
+			return nil
+		}
+		return nil
+	case "image", "audio", "video", "document", "file", "input_image", "output_image", "input_audio":
+		return walkCommonOpaqueContentFields(c, part, []string{
+			"data", "url", "file_uri", "fileUri", "file_id", "file_data", "filename", "image_url", "mime_type", "mimeType",
+		})
 	default:
-		c.unsupported(part, fmt.Sprintf("unknown content part type %q", partType))
+		c.unsupportedValue(part, "unknown content part type ", partType)
 		return nil
 	}
 }

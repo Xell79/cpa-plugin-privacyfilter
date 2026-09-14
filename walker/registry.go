@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
 )
 
 // Options configures JSON validation and indexing before protocol walking.
@@ -111,12 +111,30 @@ func (r *Registry) Walk(ctx context.Context, sourceFormat string, body []byte, o
 	if err != nil {
 		return nil, err
 	}
-	c := newCollector(ctx, entry.protocol, sourceFormat, document)
+	c := newCollector(ctx, entry.protocol, sourceFormat, document, root)
 	if err = c.validateRootControls(root); err != nil {
+		if c.err != nil {
+			return nil, c.err
+		}
 		return nil, err
 	}
 	if err = entry.walk(c, root); err != nil {
+		if c.err != nil {
+			return nil, c.err
+		}
 		return nil, err
+	}
+	if c.err != nil {
+		return nil, c.err
+	}
+	if err = c.ensureStringDisposition(root); err != nil {
+		if c.err != nil {
+			return nil, c.err
+		}
+		return nil, err
+	}
+	if c.err != nil {
+		return nil, c.err
 	}
 	if err = c.ctx.Err(); err != nil {
 		return nil, err

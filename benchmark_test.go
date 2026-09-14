@@ -28,7 +28,7 @@ func BenchmarkSanitizeRequestSizes(b *testing.B) {
 					b.Fatal(err)
 				}
 				if !result.changed || result.findings != 1 {
-					b.Fatalf("result = %+v, want one redaction", result)
+					b.Fatalf("result changed=%t findings=%d targets=%d body_len=%d, want one redaction", result.changed, result.findings, result.targets, len(result.body))
 				}
 			}
 		})

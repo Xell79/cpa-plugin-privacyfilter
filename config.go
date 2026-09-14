@@ -3,20 +3,27 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/rheodev/cpa-plugin-privacyfilter/internal/privacyengine"
-	"github.com/rheodev/cpa-plugin-privacyfilter/payload"
+	"github.com/ahoo/cpa-plugin-privacyfilter/internal/privacyengine"
+	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
 const privacyFilterProvider = "privacyfilter"
 const pluginName = "privacyfilter"
+
+const (
+	hardMaxTextBytes = 32 << 20
+	hardMaxTextNodes = 100_000
+	hardMaxFindings  = 4_096
+)
 
 type filterMode string
 
@@ -43,6 +50,7 @@ type limitsConfig struct {
 	MaxBodyBytes        int `yaml:"max_body_bytes"`
 	MaxDepth            int `yaml:"max_depth"`
 	MaxJSONNodes        int `yaml:"max_json_nodes"`
+	MaxStructuralBytes  int `yaml:"max_structural_bytes"`
 	MaxStringBytes      int `yaml:"max_string_bytes"`
 	MaxReplacements     int `yaml:"max_replacements"`
 	MaxReplacementBytes int `yaml:"max_replacement_bytes"`
@@ -80,15 +88,16 @@ func defaultConfig() privacyFilterConfig {
 			MaxBodyBytes:        jsonLimits.MaxBodyBytes,
 			MaxDepth:            jsonLimits.MaxDepth,
 			MaxJSONNodes:        jsonLimits.MaxNodes,
+			MaxStructuralBytes:  jsonLimits.MaxStructuralBytes,
 			MaxStringBytes:      jsonLimits.MaxStringBytes,
 			MaxReplacements:     jsonLimits.MaxReplacements,
 			MaxReplacementBytes: jsonLimits.MaxReplacementBytes,
 			// The detector budget is cumulative across every selected text node.
 			// Keep it aligned with the body ceiling rather than the engine's
 			// conservative one-text default; the JSON walker enforces the body cap.
-			MaxTextBytes: jsonLimits.MaxBodyBytes,
-			MaxTextNodes: 100_000,
-			MaxFindings:  4_096,
+			MaxTextBytes: hardMaxTextBytes,
+			MaxTextNodes: hardMaxTextNodes,
+			MaxFindings:  hardMaxFindings,
 		},
 	}
 }
@@ -140,6 +149,9 @@ func (cfg privacyFilterConfig) validate() error {
 	if cfg.Limits.MaxTextBytes <= 0 || cfg.Limits.MaxTextNodes <= 0 || cfg.Limits.MaxFindings <= 0 {
 		return fmt.Errorf("invalid privacyfilter config: detector limits must be positive")
 	}
+	if cfg.Limits.MaxTextBytes > hardMaxTextBytes || cfg.Limits.MaxTextNodes > hardMaxTextNodes || cfg.Limits.MaxFindings > hardMaxFindings {
+		return fmt.Errorf("invalid privacyfilter config: configured detector limit exceeds hard maximum")
+	}
 	for kind := range cfg.Replacements {
 		if _, ok := replacementKind(kind); !ok {
 			return fmt.Errorf("invalid privacyfilter config: unknown replacement kind %q", kind)
@@ -164,6 +176,7 @@ func (cfg privacyFilterConfig) payloadLimits() payload.Limits {
 		MaxBodyBytes:        cfg.Limits.MaxBodyBytes,
 		MaxDepth:            cfg.Limits.MaxDepth,
 		MaxNodes:            cfg.Limits.MaxJSONNodes,
+		MaxStructuralBytes:  cfg.Limits.MaxStructuralBytes,
 		MaxStringBytes:      cfg.Limits.MaxStringBytes,
 		MaxReplacements:     cfg.Limits.MaxReplacements,
 		MaxReplacementBytes: cfg.Limits.MaxReplacementBytes,
@@ -256,24 +269,44 @@ type ruleMaterial struct {
 	source              string
 }
 
+const embeddedGitleaksSHA256 = "e163e53b9e7e8a8511e77271e2b323ed057759542a6d988258afe3a1fa329caf"
+
+var expectedEmbeddedCompatibilityIssues = []privacyengine.CompatibilityIssue{
+	{Source: privacyengine.RuleSourceEmbedded, Feature: "global.allowlist.paths", Action: privacyengine.CompatibilityIgnored, Detail: "path criteria are unavailable for protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "freemius-secret-key", Feature: "rule.path", Action: privacyengine.CompatibilitySkipped, Detail: "path-constrained rules do not run for pathless protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "generic-api-key", Feature: "rule.allowlists[3].paths", Action: privacyengine.CompatibilityIgnored, Detail: "path criteria are unavailable for protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "github-app-token", Feature: "rule.allowlists[0].paths", Action: privacyengine.CompatibilityIgnored, Detail: "path criteria are unavailable for protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "github-pat", Feature: "rule.allowlists[0].paths", Action: privacyengine.CompatibilityIgnored, Detail: "path criteria are unavailable for protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "hashicorp-tf-password", Feature: "rule.path", Action: privacyengine.CompatibilitySkipped, Detail: "path-constrained rules do not run for pathless protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "kubernetes-secret-yaml", Feature: "rule.path", Action: privacyengine.CompatibilitySkipped, Detail: "path-constrained rules do not run for pathless protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "nuget-config-password", Feature: "rule.path", Action: privacyengine.CompatibilitySkipped, Detail: "path-constrained rules do not run for pathless protocol text"},
+	{Source: privacyengine.RuleSourceEmbedded, RuleID: "pkcs12-file", Feature: "rule.path-only", Action: privacyengine.CompatibilitySkipped, Detail: "path-only rules cannot produce a protocol-text span"},
+}
+
+func validatePinnedEmbeddedRules(report privacyengine.CompatibilityReport) error {
+	if fmt.Sprintf("%x", sha256.Sum256(embeddedGitleaks)) != embeddedGitleaksSHA256 {
+		return fmt.Errorf("privacyfilter: embedded privacy rules do not match the pinned snapshot")
+	}
+	if report.RulesSeen != 222 || report.RulesLoaded != 217 || report.RulesSkipped != 5 {
+		return fmt.Errorf("privacyfilter: embedded privacy rule compatibility summary changed")
+	}
+	if len(report.Issues) != len(expectedEmbeddedCompatibilityIssues) {
+		return fmt.Errorf("privacyfilter: embedded privacy rule compatibility issues changed")
+	}
+	for index, got := range report.Issues {
+		want := expectedEmbeddedCompatibilityIssues[index]
+		if got.Source != want.Source || got.RuleID != want.RuleID || got.Feature != want.Feature || got.Action != want.Action || got.Detail != want.Detail {
+			return fmt.Errorf("privacyfilter: embedded privacy rule compatibility issue %d changed", index)
+		}
+	}
+	return nil
+}
+
 func (cfg privacyFilterConfig) loadRuleMaterial(pluginDir string) (ruleMaterial, error) {
 	configured := strings.TrimSpace(cfg.GitleaksTOML)
 	if configured == "" {
-		sidecar := filepath.Join(pluginDir, "rules", "gitleaks.toml")
-		if data, err := os.ReadFile(sidecar); err == nil {
-			// Preserve the v0.2 sidecar precedence as an explicit replace source.
-			// The conventional sidecar is the same Gitleaks snapshot as the
-			// embedded rules, so its known path-only features receive the same
-			// visible compatibility report rather than making startup fail.
-			return ruleMaterial{
-				custom:              data,
-				mode:                privacyengine.CustomRulesReplace,
-				customCompatibility: privacyengine.CompatibilitySkipUnsupported,
-				source:              sidecar,
-			}, nil
-		} else if !os.IsNotExist(err) {
-			return ruleMaterial{}, fmt.Errorf("read privacy rules sidecar: %w", err)
-		}
+		// An omitted path always means the rules compiled into this library. Do not
+		// let a writable or stale file beside the plugin silently replace policy.
 		return ruleMaterial{embedded: embeddedGitleaks, source: "embedded"}, nil
 	}
 
@@ -310,17 +343,36 @@ func newEngine(pluginDir string, cfg privacyFilterConfig) (*privacyengine.Engine
 	if err != nil {
 		return nil, privacyengine.CompatibilityReport{}, err
 	}
-	engine, report, err := privacyengine.New(privacyengine.Config{
+	engineConfig := privacyengine.Config{
 		EmbeddedTOML:          material.embedded,
 		CustomTOML:            material.custom,
 		CustomMode:            material.mode,
 		EmbeddedCompatibility: privacyengine.CompatibilitySkipUnsupported,
 		CustomCompatibility:   material.customCompatibility,
 		DefaultLimits:         cfg.engineLimits(),
-	})
+	}
+	engine, report, err := privacyengine.New(engineConfig)
 	if err != nil {
 		return nil, report, fmt.Errorf("create privacy engine: %w", err)
 	}
+
+	if len(material.embedded) != 0 {
+		embeddedReport := report
+		if len(material.custom) != 0 {
+			_, embeddedReport, err = privacyengine.New(privacyengine.Config{
+				EmbeddedTOML:          material.embedded,
+				EmbeddedCompatibility: privacyengine.CompatibilitySkipUnsupported,
+				DefaultLimits:         cfg.engineLimits(),
+			})
+			if err != nil {
+				return nil, embeddedReport, fmt.Errorf("validate embedded privacy rules: %w", err)
+			}
+		}
+		if err = validatePinnedEmbeddedRules(embeddedReport); err != nil {
+			return nil, report, err
+		}
+	}
+
 	log.WithFields(log.Fields{
 		"rules_seen":    report.RulesSeen,
 		"rules_loaded":  report.RulesLoaded,
