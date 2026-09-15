@@ -513,9 +513,10 @@ jobs:
             --title "${GITHUB_REF_NAME}" \
             --notes "Immutable privacyfilter release ${GITHUB_REF_NAME}. See release-manifest.json and checksums.txt for provenance."
 
-          release_id="$(gh api \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
-            --jq '.id')"
+          release_id="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq ".[] | select(.tag_name == \"${GITHUB_REF_NAME}\") | .id")"
+          [[ "${release_id}" =~ ^[0-9]+$ ]]
           gh api --method PATCH \
             "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
             -F draft=false >/dev/null

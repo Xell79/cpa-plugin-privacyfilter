@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	pluginVersion  = "0.3.1"
+	pluginVersion  = "0.3.2"
 	pluginRevision = "unknown"
 )
 
