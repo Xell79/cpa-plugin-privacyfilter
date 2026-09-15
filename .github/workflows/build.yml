@@ -169,7 +169,7 @@ jobs:
           set -euo pipefail
           mkdir -p "${DIST_DIR}"
           git config --global --add safe.directory "${GITHUB_WORKSPACE}"
-          while IFS= read -r -d '' path; do chmod a-w -- "${path}"; done < <(git ls-files -z)
+          while IFS= read -r -d '' path; do chmod a-w "./${path}"; done < <(git ls-files -z)
           CGO_ENABLED=1 GOOS=linux GOARCH=${{ matrix.goarch }} \
             go build -trimpath -buildvcs=true -buildmode=c-shared \
               -ldflags "-s -w -X main.pluginVersion=${VERSION} -X main.pluginRevision=${GITHUB_SHA}" \
@@ -322,7 +322,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "${DIST_DIR}"
-          while IFS= read -r -d '' path; do chmod a-w -- "${path}"; done < <(git ls-files -z)
+          while IFS= read -r -d '' path; do chmod a-w "./${path}"; done < <(git ls-files -z)
           CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -trimpath -buildvcs=true -buildmode=c-shared \
               -ldflags "-s -w -X main.pluginVersion=${VERSION} -X main.pluginRevision=${GITHUB_SHA}" \
