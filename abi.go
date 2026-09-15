@@ -47,24 +47,50 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	log "github.com/sirupsen/logrus"
 )
 
 var privacyFilterABIState = struct {
 	sync.RWMutex
-	host         *C.cliproxy_host_api
-	plugin       *privacyFilterPlugin
-	shuttingDown bool
-	inFlight     sync.WaitGroup
+	host           *C.cliproxy_host_api
+	plugin         *privacyFilterPlugin
+	runtime        *runtimeState
+	shuttingDown   bool
+	nativeInFlight sync.WaitGroup
+	inFlight       sync.WaitGroup
 }{}
 
-const maxCGoBytesLen = C.size_t(1<<31 - 1)
+const (
+	// implementedSchemaVersion is the newest RPC contract this plugin uses.
+	// Schema 2 adds active request termination and request.complete lifecycle
+	// notifications while keeping later response-stream omission semantics out
+	// of this request-only implementation.
+	implementedSchemaVersion uint32 = 2
+	legacySchemaVersion      uint32 = 1
+
+	// maxABIRequestBytes is checked before C.GoBytes duplicates the host payload.
+	// Request bodies have their own tighter configurable limit at the walker.
+	maxABIRequestBytes = C.size_t(64 << 20)
+
+	nativeScanConcurrency   = 4
+	nativeScanAdmissionWait = 100 * time.Millisecond
+	nativeScanDeadline      = 10 * time.Second
+)
+
+var (
+	errNativeScanAdmission = errors.New("privacyfilter: native scan admission unavailable")
+	nativeScanSlots        = make(chan struct{}, nativeScanConcurrency)
+)
 
 type abiEnvelope struct {
 	OK     bool            `json:"ok"`
@@ -78,8 +104,11 @@ type abiError struct {
 }
 
 type abiLifecycleRequest struct {
-	ConfigYAML []byte `json:"config_yaml"`
-	PluginDir  string `json:"plugin_dir,omitempty"`
+	ConfigYAML    []byte `json:"config_yaml"`
+	SchemaVersion uint32 `json:"schema_version"`
+	// PluginDir was never part of the v7.2.157 host payload. Keep accepting it
+	// for test harnesses and legacy hosts; production falls back to dladdr.
+	PluginDir string `json:"plugin_dir,omitempty"`
 }
 
 type abiRequestInterceptRequest struct {
@@ -94,7 +123,8 @@ type abiRegistration struct {
 }
 
 type abiCapabilities struct {
-	RequestInterceptor bool `json:"request_interceptor"`
+	RequestInterceptor     bool `json:"request_interceptor"`
+	RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
 }
 
 func main() {}
@@ -125,30 +155,147 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 }
 
 //export PrivacyFilterPluginCall
-func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+func PrivacyFilterPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) (result C.int) {
+	result = 1
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
 	}
-	if method == nil {
-		writeABIResponse(response, abiErrorEnvelope("invalid_method", "method is required"))
-		return 0
-	}
-	var requestBytes []byte
-	if request != nil && requestLen > 0 {
-		if requestLen > maxCGoBytesLen {
-			writeABIResponse(response, abiErrorEnvelope("request_too_large", "request payload is too large"))
-			return 0
+	methodName := ""
+	defer func() {
+		if recover() == nil {
+			return
 		}
+		if writeABIResponse(response, abiPanicEnvelope(methodName)) {
+			result = 0
+		}
+	}()
+	if method != nil {
+		methodName = C.GoString(method)
+	}
+
+	if method == nil {
+		return writeABIResult(response, abiErrorEnvelope("invalid_method", "method is required"))
+	}
+	if requestLen > maxABIRequestBytes {
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusRequestEntityTooLarge,
+			"request_too_large",
+			"privacy filter request payload exceeds the native plugin limit",
+		))
+	}
+	if requestLen > 0 && request == nil {
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusServiceUnavailable,
+			"invalid_request",
+			"privacy filter received an invalid native request buffer",
+		))
+	}
+
+	ctx := context.Background()
+	cancel := func() {}
+	if isRequestInterceptMethod(methodName) {
+		done, errBegin := beginNativeScanCall()
+		if errBegin != nil {
+			return writeABIResult(response, abiFailureEnvelope(
+				methodName,
+				http.StatusServiceUnavailable,
+				"plugin_unavailable",
+				"privacy filter is not available for request inspection",
+			))
+		}
+		defer done()
+
+		ctx, cancel = context.WithTimeout(ctx, nativeScanDeadline)
+		defer cancel()
+		release, errAdmission := acquireNativeScan(ctx, nativeScanAdmissionWait)
+		if errAdmission != nil {
+			code := "privacy_filter_busy"
+			message := "privacy filter scan capacity is temporarily unavailable"
+			if errors.Is(errAdmission, context.DeadlineExceeded) {
+				code = "privacy_filter_deadline"
+				message = "privacy filter inspection deadline exceeded"
+			}
+			return writeABIResult(response, abiFailureEnvelope(
+				methodName,
+				http.StatusServiceUnavailable,
+				code,
+				message,
+			))
+		}
+		defer release()
+	}
+
+	var requestBytes []byte
+	if requestLen > 0 {
 		requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	}
-	raw, errHandle := handlePrivacyFilterABIMethod(context.Background(), C.GoString(method), requestBytes)
-	if errHandle != nil {
-		writeABIResponse(response, abiErrorEnvelope("plugin_error", errHandle.Error()))
-		return 0
+	raw, errHandle := handlePrivacyFilterABIMethod(ctx, methodName, requestBytes)
+	if isRequestInterceptMethod(methodName) && ctx.Err() != nil {
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusServiceUnavailable,
+			"privacy_filter_deadline",
+			"privacy filter inspection deadline exceeded",
+		))
 	}
-	writeABIResponse(response, raw)
-	return 0
+	if errHandle != nil {
+		message := "privacy filter could not safely inspect the request"
+		if methodName == pluginabi.MethodPluginRegister || methodName == pluginabi.MethodPluginReconfigure {
+			// Lifecycle errors contain only configuration/rule diagnostics and are
+			// needed by operators to correct a plugin that cannot start. Request
+			// interceptor failures stay generic because they may be input-derived.
+			message = errHandle.Error()
+		}
+		return writeABIResult(response, abiFailureEnvelope(
+			methodName,
+			http.StatusServiceUnavailable,
+			"plugin_error",
+			message,
+		))
+	}
+	return writeABIResult(response, raw)
+}
+
+func isRequestInterceptMethod(method string) bool {
+	return method == pluginabi.MethodRequestInterceptBefore || method == pluginabi.MethodRequestInterceptAfter
+}
+
+func acquireNativeScan(ctx context.Context, wait time.Duration) (func(), error) {
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if wait <= 0 {
+		select {
+		case nativeScanSlots <- struct{}{}:
+			return func() { <-nativeScanSlots }, nil
+		default:
+			return nil, errNativeScanAdmission
+		}
+	}
+
+	timer := time.NewTimer(wait)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+	select {
+	case nativeScanSlots <- struct{}{}:
+		return func() { <-nativeScanSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-timer.C:
+		return nil, errNativeScanAdmission
+	}
 }
 
 //export PrivacyFilterPluginFree
@@ -164,14 +311,28 @@ func PrivacyFilterPluginShutdown() {
 	privacyFilterABIState.shuttingDown = true
 	privacyFilterABIState.plugin = nil
 	privacyFilterABIState.host = nil
+	runtime := privacyFilterABIState.runtime
 	privacyFilterABIState.Unlock()
+	privacyFilterABIState.nativeInFlight.Wait()
 	privacyFilterABIState.inFlight.Wait()
+	if runtime != nil && runtime.cache != nil {
+		runtime.cache.Clear()
+	}
+	privacyFilterABIState.Lock()
+	if privacyFilterABIState.runtime == runtime {
+		privacyFilterABIState.runtime = nil
+	}
+	privacyFilterABIState.Unlock()
 }
 
 func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		return handlePrivacyFilterRegister(request)
+	case pluginabi.MethodPluginQuiesce:
+		return handlePrivacyFilterQuiesce()
+	case pluginabi.MethodRequestComplete:
+		return handlePrivacyFilterRequestComplete(ctx, request)
 	}
 
 	p, done, errPlugin := beginPrivacyFilterPluginCall()
@@ -200,12 +361,36 @@ func handlePrivacyFilterABIMethod(ctx context.Context, method string, request []
 	}
 }
 
+// request.complete remains accepted while quiesced. It only touches the
+// concurrency-safe runtime cache, so it cannot start new interceptor work or
+// race plugin teardown, and late lifecycle notifications still release state.
+func handlePrivacyFilterRequestComplete(_ context.Context, request []byte) ([]byte, error) {
+	var req pluginapi.RequestCompletion
+	if errDecode := json.Unmarshal(request, &req); errDecode != nil {
+		return nil, errDecode
+	}
+	privacyFilterABIState.RLock()
+	runtime := privacyFilterABIState.runtime
+	privacyFilterABIState.RUnlock()
+	if runtime != nil {
+		releaseRequestScanState(runtime.cache, req)
+	}
+	return abiOKEnvelope(struct{}{})
+}
+
 func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 	var req abiLifecycleRequest
 	if errDecode := json.Unmarshal(request, &req); errDecode != nil {
 		return nil, errDecode
 	}
-	plugin, errBuild := buildPlugin(req.ConfigYAML, req.PluginDir)
+	privacyFilterABIState.Lock()
+	if privacyFilterABIState.runtime == nil {
+		privacyFilterABIState.runtime = newRuntimeState()
+	}
+	runtime := privacyFilterABIState.runtime
+	privacyFilterABIState.Unlock()
+
+	plugin, errBuild := buildPluginWithRuntime(req.ConfigYAML, req.PluginDir, runtime)
 	if errBuild != nil {
 		return nil, errBuild
 	}
@@ -213,17 +398,63 @@ func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 	if !ok || p == nil {
 		return nil, fmt.Errorf("privacyfilter plugin registration returned invalid interceptor")
 	}
+	negotiatedSchema := negotiateSchemaVersion(req.SchemaVersion)
+	if negotiatedSchema < implementedSchemaVersion &&
+		(p.cfg.OnError == onErrorBlock || len(p.blockRuleIDs) > 0) {
+		return nil, fmt.Errorf("privacyfilter: fail-closed mode requires host schema %d or newer", implementedSchemaVersion)
+	}
+	plugin.SchemaVersion = negotiatedSchema
+	if negotiatedSchema < implementedSchemaVersion {
+		plugin.Capabilities.RequestLifecyclePlugin = nil
+	}
 	privacyFilterABIState.Lock()
 	privacyFilterABIState.plugin = p
 	privacyFilterABIState.shuttingDown = false
 	privacyFilterABIState.Unlock()
+	log.WithFields(log.Fields{
+		"version":  pluginVersion,
+		"revision": pluginRevision,
+	}).Info("privacyfilter plugin registered")
 	return abiOKEnvelope(abiRegistration{
-		SchemaVersion: pluginabi.SchemaVersion,
+		SchemaVersion: negotiatedSchema,
 		Metadata:      plugin.Metadata,
 		Capabilities: abiCapabilities{
-			RequestInterceptor: plugin.Capabilities.RequestInterceptor != nil,
+			RequestInterceptor:     plugin.Capabilities.RequestInterceptor != nil,
+			RequestLifecyclePlugin: plugin.Capabilities.RequestLifecyclePlugin != nil,
 		},
 	})
+}
+
+func negotiateSchemaVersion(hostSchema uint32) uint32 {
+	if hostSchema == 0 {
+		hostSchema = legacySchemaVersion
+	}
+	if hostSchema < implementedSchemaVersion {
+		return hostSchema
+	}
+	return implementedSchemaVersion
+}
+
+func handlePrivacyFilterQuiesce() ([]byte, error) {
+	privacyFilterABIState.Lock()
+	privacyFilterABIState.shuttingDown = true
+	privacyFilterABIState.Unlock()
+	privacyFilterABIState.nativeInFlight.Wait()
+	privacyFilterABIState.inFlight.Wait()
+	return abiOKEnvelope(struct{}{})
+}
+
+func beginNativeScanCall() (func(), error) {
+	privacyFilterABIState.Lock()
+	defer privacyFilterABIState.Unlock()
+	if privacyFilterABIState.shuttingDown {
+		return nil, fmt.Errorf("privacyfilter plugin is shutting down")
+	}
+	if privacyFilterABIState.plugin == nil {
+		return nil, fmt.Errorf("privacyfilter plugin is not registered")
+	}
+	privacyFilterABIState.nativeInFlight.Add(1)
+	return privacyFilterABIState.nativeInFlight.Done, nil
 }
 
 func beginPrivacyFilterPluginCall() (*privacyFilterPlugin, func(), error) {
@@ -259,14 +490,52 @@ func abiErrorEnvelope(code, message string) []byte {
 	return raw
 }
 
-func writeABIResponse(response *C.cliproxy_buffer, raw []byte) {
+func abiPanicEnvelope(method string) []byte {
+	return abiFailureEnvelope(
+		method,
+		http.StatusServiceUnavailable,
+		"plugin_panic",
+		"privacy filter recovered an internal panic and failed closed",
+	)
+}
+
+func abiFailureEnvelope(method string, status int, code, message string) []byte {
+	if method == pluginabi.MethodRequestInterceptBefore || method == pluginabi.MethodRequestInterceptAfter {
+		body, _ := json.Marshal(map[string]any{
+			"error": map[string]string{
+				"type":    code,
+				"message": message,
+			},
+		})
+		raw, err := abiOKEnvelope(pluginapi.RequestInterceptResponse{
+			Terminate:       true,
+			StatusCode:      status,
+			ResponseHeaders: http.Header{"Content-Type": []string{"application/json"}},
+			ResponseBody:    body,
+		})
+		if err == nil {
+			return raw
+		}
+	}
+	return abiErrorEnvelope(code, message)
+}
+
+func writeABIResult(response *C.cliproxy_buffer, raw []byte) C.int {
+	if !writeABIResponse(response, raw) {
+		return 1
+	}
+	return 0
+}
+
+func writeABIResponse(response *C.cliproxy_buffer, raw []byte) bool {
 	if response == nil || len(raw) == 0 {
-		return
+		return false
 	}
 	ptr := C.CBytes(raw)
 	if ptr == nil {
-		return
+		return false
 	}
 	response.ptr = ptr
 	response.len = C.size_t(len(raw))
+	return true
 }

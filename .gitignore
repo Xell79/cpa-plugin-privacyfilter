@@ -9,3 +9,5 @@ test-output*
 *.iml
 *.log
 *.tmp
+__pycache__/
+*.py[cod]

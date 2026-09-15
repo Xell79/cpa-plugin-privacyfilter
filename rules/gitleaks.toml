@@ -2118,7 +2118,7 @@ regexes = [
 [[rules.allowlists]]
 condition = "AND"
 paths = [
-    '''\.bb$''', '''\.bbappend$''', '''\.bbclass$''', '''\.inc$''',
+    '''\.bb$''','''\.bbappend$''','''\.bbclass$''','''\.inc$''',
 ]
 regexTarget = "line"
 regexes = [
