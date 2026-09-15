@@ -509,5 +509,16 @@ jobs:
             dist/THIRD_PARTY_LICENSES.md \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
+            --draft \
             --title "${GITHUB_REF_NAME}" \
             --notes "Immutable privacyfilter release ${GITHUB_REF_NAME}. See release-manifest.json and checksums.txt for provenance."
+
+          release_id="$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" \
+            --jq '.id')"
+          gh api --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -F draft=false >/dev/null
+          test "$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            --jq '.immutable')" = true
