@@ -14,10 +14,12 @@ default.
 > `ahoo` fork deliberately does not claim a second Store identity. Install only
 > a checksum-verified artifact from this repository's immutable Releases.
 >
-> Install `v0.3.0` only after its immutable GitHub Release exists, and only from
-> that Release's checksum-verified artifacts. Never install a source-tree or
-> development build; verify the exact version and filenames before following the
-> examples below.
+> Do not install `v0.3.0`: its artifact set passed the release gates, but it was
+> published before repository release immutability was enabled. `v0.3.1` is the
+> first candidate published under that policy. Install it only after GitHub marks
+> the Release immutable, and only from that Release's checksum-verified artifacts.
+> Never install a source-tree or development build; verify the exact version and
+> filenames before following the examples below.
 
 ## Security model
 
@@ -175,7 +177,7 @@ one canonical root library:
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.0_linux_amd64.zip
+unzip privacyfilter_0.3.1_linux_amd64.zip
 ```
 
 The archive contains exactly `privacyfilter.so` (`.dylib` on macOS, `.dll` on
