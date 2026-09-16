@@ -19,26 +19,30 @@ import (
 )
 
 const (
-	pluginID       = "privacyfilter"
-	syntheticValue = "q7z"
-	maxHTTPBody    = 2 << 20
+	pluginID                = "privacyfilter"
+	syntheticValue          = "q7z"
+	reasoningReplayText     = "integrity-replay-value"
+	reasoningSensitiveValue = "replay@example.test"
+	maxHTTPBody             = 2 << 20
 )
 
 type mockState struct {
-	Requests              int    `json:"requests"`
-	BeforeOrderedRequests int    `json:"before_ordered_requests"`
-	AfterOrderedRequests  int    `json:"after_ordered_requests"`
-	RedactedRequests      int    `json:"redacted_requests"`
-	MarkerRequests        int    `json:"marker_requests"`
-	BeforeProbeRequests   int    `json:"before_probe_requests"`
-	AfterProbeRequests    int    `json:"after_probe_requests"`
-	PlaceholderRequests   int    `json:"placeholder_requests"`
-	ToolCallRequests      int    `json:"tool_call_requests"`
-	ResponsesRequests     int    `json:"responses_requests"`
-	ResponsesRedacted     int    `json:"responses_redacted"`
-	InvalidRequests       int    `json:"invalid_requests"`
-	LastBodyBytes         int    `json:"last_body_bytes"`
-	LastBodySHA256        string `json:"last_body_sha256"`
+	Requests                 int    `json:"requests"`
+	BeforeOrderedRequests    int    `json:"before_ordered_requests"`
+	AfterOrderedRequests     int    `json:"after_ordered_requests"`
+	RedactedRequests         int    `json:"redacted_requests"`
+	MarkerRequests           int    `json:"marker_requests"`
+	BeforeProbeRequests      int    `json:"before_probe_requests"`
+	AfterProbeRequests       int    `json:"after_probe_requests"`
+	PlaceholderRequests      int    `json:"placeholder_requests"`
+	ToolCallRequests         int    `json:"tool_call_requests"`
+	ResponsesRequests        int    `json:"responses_requests"`
+	ResponsesRedacted        int    `json:"responses_redacted"`
+	ReasoningReplayRequests  int    `json:"reasoning_replay_requests"`
+	ReasoningReplayPreserved int    `json:"reasoning_replay_preserved"`
+	InvalidRequests          int    `json:"invalid_requests"`
+	LastBodyBytes            int    `json:"last_body_bytes"`
+	LastBodySHA256           string `json:"last_body_sha256"`
 }
 
 type synchronizedMockState struct {
@@ -96,24 +100,26 @@ type noStanzaAssertions struct {
 }
 
 type explicitAssertions struct {
-	AllConfigured         bool `json:"all_configured"`
-	AllRegistered         bool `json:"all_registered"`
-	AllEnabled            bool `json:"all_enabled"`
-	AllEffective          bool `json:"all_effective"`
-	MetadataExact         bool `json:"metadata_exact"`
-	ConfigFieldsExact     bool `json:"config_fields_exact"`
-	PrioritiesExact       bool `json:"priorities_exact"`
-	SuccessfulForward     bool `json:"successful_forward"`
-	BeforeAuthOrdered     bool `json:"before_auth_ordered"`
-	AfterAuthOrdered      bool `json:"after_auth_ordered"`
-	PrivacyFilterLast     bool `json:"privacyfilter_last"`
-	ValueRedacted         bool `json:"value_redacted"`
-	MarkerNotForwarded    bool `json:"marker_not_forwarded"`
-	SuccessStateValid     bool `json:"success_state_valid"`
-	ResponsesLiteForward  bool `json:"responses_lite_forward"`
-	ResponsesLiteRedacted bool `json:"responses_lite_redacted"`
-	ActiveTermination     bool `json:"active_termination"`
-	BlockedNotForwarded   bool `json:"blocked_not_forwarded"`
+	AllConfigured            bool `json:"all_configured"`
+	AllRegistered            bool `json:"all_registered"`
+	AllEnabled               bool `json:"all_enabled"`
+	AllEffective             bool `json:"all_effective"`
+	MetadataExact            bool `json:"metadata_exact"`
+	ConfigFieldsExact        bool `json:"config_fields_exact"`
+	PrioritiesExact          bool `json:"priorities_exact"`
+	SuccessfulForward        bool `json:"successful_forward"`
+	BeforeAuthOrdered        bool `json:"before_auth_ordered"`
+	AfterAuthOrdered         bool `json:"after_auth_ordered"`
+	PrivacyFilterLast        bool `json:"privacyfilter_last"`
+	ValueRedacted            bool `json:"value_redacted"`
+	MarkerNotForwarded       bool `json:"marker_not_forwarded"`
+	SuccessStateValid        bool `json:"success_state_valid"`
+	ResponsesLiteForward     bool `json:"responses_lite_forward"`
+	ResponsesLiteRedacted    bool `json:"responses_lite_redacted"`
+	ReasoningReplayForward   bool `json:"reasoning_replay_forward"`
+	ReasoningReplayPreserved bool `json:"reasoning_replay_preserved"`
+	ActiveTermination        bool `json:"active_termination"`
+	BlockedNotForwarded      bool `json:"blocked_not_forwarded"`
 }
 
 type phaseReport struct {
@@ -211,11 +217,20 @@ func serveMock(address string) error {
 		afterProbePresent := bytes.Contains(body, []byte("after-probe"))
 		placeholderPresent := bytes.Contains(body, []byte("[密钥]"))
 		toolCallPresent := bytes.Contains(body, []byte("tool_calls"))
-		redacted := validRedactedToolRequest(body)
+		reasoningReplayPresent := bytes.Contains(body, []byte("reasoning_details"))
+		toolRedacted := validRedactedToolRequest(body)
+		reasoningReplayPreserved := validReasoningReplayRequest(body)
+		redacted := toolRedacted || reasoningReplayPreserved
 		digest := sha256.Sum256(body)
 
 		state.mu.Lock()
 		state.value.Requests++
+		if reasoningReplayPresent {
+			state.value.ReasoningReplayRequests++
+		}
+		if reasoningReplayPreserved {
+			state.value.ReasoningReplayPreserved++
+		}
 		state.value.LastBodyBytes = len(body)
 		state.value.LastBodySHA256 = hex.EncodeToString(digest[:])
 		if redacted {
@@ -320,6 +335,53 @@ func validRedactedToolRequest(body []byte) bool {
 	}
 	value, ok := arguments["api_key"].(string)
 	return ok && value == "[密钥]"
+}
+
+func validReasoningReplayRequest(body []byte) bool {
+	var payload struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			Reasoning        string `json:"reasoning"`
+			ReasoningContent string `json:"reasoning_content"`
+			ReasoningDetails []struct {
+				Type      string `json:"type"`
+				Text      string `json:"text"`
+				Summary   string `json:"summary"`
+				Data      string `json:"data"`
+				Signature string `json:"signature"`
+				ID        string `json:"id"`
+				Format    string `json:"format"`
+				Index     int    `json:"index"`
+			} `json:"reasoning_details"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Model != "mock-model" || len(payload.Messages) != 2 {
+		return false
+	}
+	if payload.Messages[0].Role != "user" || payload.Messages[0].Content != "[邮箱]" {
+		return false
+	}
+	assistant := payload.Messages[1]
+	if assistant.Role != "assistant" || assistant.Content != "answer" ||
+		assistant.Reasoning != reasoningReplayText || assistant.ReasoningContent != reasoningReplayText ||
+		len(assistant.ReasoningDetails) != 3 {
+		return false
+	}
+	text := assistant.ReasoningDetails[0]
+	if text.Type != "reasoning.text" || text.Text != reasoningReplayText ||
+		text.Signature != "integrity-signature" || text.ID != "rd_1" || text.Format != "unknown" || text.Index != 0 {
+		return false
+	}
+	summary := assistant.ReasoningDetails[1]
+	if summary.Type != "reasoning.summary" || summary.Summary != reasoningReplayText ||
+		summary.ID != "rd_2" || summary.Format != "openai-responses-v1" || summary.Index != 1 {
+		return false
+	}
+	encrypted := assistant.ReasoningDetails[2]
+	return encrypted.Type == "reasoning.encrypted" && encrypted.Data == reasoningReplayText &&
+		encrypted.ID == "rd_3" && encrypted.Format == "anthropic-claude-v1" && encrypted.Index == 2
 }
 
 func validRedactedResponsesLiteRequest(body []byte) bool {
@@ -673,6 +735,21 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 		stateAfterResponses.PlaceholderRequests == 2 &&
 		stateAfterResponses.InvalidRequests == 0
 
+	reasoningStatus, err := postReasoningReplay(client, opts)
+	if err != nil {
+		return assertions, err
+	}
+	assertions.ReasoningReplayForward = reasoningStatus == http.StatusOK
+	stateAfterReasoning, err := fetchMockState(client, opts.mockURL)
+	if err != nil {
+		return assertions, err
+	}
+	assertions.ReasoningReplayPreserved = stateAfterReasoning.Requests == 3 &&
+		stateAfterReasoning.ReasoningReplayRequests == 1 &&
+		stateAfterReasoning.ReasoningReplayPreserved == 1 &&
+		stateAfterReasoning.RedactedRequests == 3 &&
+		stateAfterReasoning.InvalidRequests == 0
+
 	blockedStatus, err := postChat(client, opts, true)
 	if err != nil {
 		return assertions, err
@@ -682,7 +759,7 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 	if err != nil {
 		return assertions, err
 	}
-	assertions.BlockedNotForwarded = stateAfterBlock == stateAfterResponses
+	assertions.BlockedNotForwarded = stateAfterBlock == stateAfterReasoning
 
 	if !allTrue(
 		assertions.AllConfigured,
@@ -701,11 +778,13 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 		assertions.SuccessStateValid,
 		assertions.ResponsesLiteForward,
 		assertions.ResponsesLiteRedacted,
+		assertions.ReasoningReplayForward,
+		assertions.ReasoningReplayPreserved,
 		assertions.ActiveTermination,
 		assertions.BlockedNotForwarded,
 	) {
 		return assertions, fmt.Errorf(
-			"explicit exact-Host assertion failed: configured=%t registered=%t high_registered=%t low_registered=%t privacy_registered=%t enabled=%t effective=%t metadata=%t fields=%t priorities=%t success_status=%d responses_status=%d blocked_status=%d success_requests=%d responses_requests=%d final_requests=%d before_ordered=%d after_ordered=%d redacted=%d responses_redacted=%d markers=%d before_probe=%d after_probe=%d placeholder=%d tool_call=%d invalid=%d body_bytes=%d body_sha256=%s",
+			"explicit exact-Host assertion failed: configured=%t registered=%t high_registered=%t low_registered=%t privacy_registered=%t enabled=%t effective=%t metadata=%t fields=%t priorities=%t success_status=%d responses_status=%d reasoning_status=%d blocked_status=%d success_requests=%d responses_requests=%d reasoning_requests=%d reasoning_preserved=%d final_requests=%d before_ordered=%d after_ordered=%d redacted=%d responses_redacted=%d markers=%d before_probe=%d after_probe=%d placeholder=%d tool_call=%d invalid=%d body_bytes=%d body_sha256=%s",
 			assertions.AllConfigured,
 			assertions.AllRegistered,
 			entries["order-high"].Registered,
@@ -718,9 +797,12 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 			assertions.PrioritiesExact,
 			successStatus,
 			responsesStatus,
+			reasoningStatus,
 			blockedStatus,
 			stateAfterSuccess.Requests,
 			stateAfterResponses.ResponsesRequests,
+			stateAfterReasoning.ReasoningReplayRequests,
+			stateAfterReasoning.ReasoningReplayPreserved,
 			stateAfterBlock.Requests,
 			stateAfterBlock.BeforeOrderedRequests,
 			stateAfterBlock.AfterOrderedRequests,
@@ -791,6 +873,43 @@ func postChat(client *http.Client, opts verifierOptions, blocked bool) (int, err
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, errors.New("chat request failed")
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxHTTPBody))
+	return response.StatusCode, nil
+}
+
+func postReasoningReplay(client *http.Client, opts verifierOptions) (int, error) {
+	body := []byte(`{
+	  "model":"mock-model",
+	  "messages":[
+	    {"role":"user","content":"` + reasoningSensitiveValue + `"},
+	    {
+	      "role":"assistant",
+	      "content":"answer",
+	      "reasoning":"` + reasoningReplayText + `",
+	      "reasoning_content":"` + reasoningReplayText + `",
+	      "reasoning_details":[
+	        {"type":"reasoning.text","text":"` + reasoningReplayText + `","signature":"integrity-signature","id":"rd_1","format":"unknown","index":0},
+	        {"type":"reasoning.summary","summary":"` + reasoningReplayText + `","id":"rd_2","format":"openai-responses-v1","index":1},
+	        {"type":"reasoning.encrypted","data":"` + reasoningReplayText + `","id":"rd_3","format":"anthropic-claude-v1","index":2}
+	      ]
+	    }
+	  ],
+	  "stream":false
+	}`)
+	request, err := http.NewRequest(http.MethodPost, opts.hostURL+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return 0, errors.New("could not construct reasoning replay request")
+	}
+	request.Header.Set("Authorization", "Bearer "+opts.apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	// Preserve the compatibility body rather than replacing it with the ordering
+	// probes' Chat Completions fixture. Privacyfilter still runs in both phases.
+	request.Header.Set("X-Harness-Block", "1")
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, errors.New("reasoning replay request failed")
 	}
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxHTTPBody))

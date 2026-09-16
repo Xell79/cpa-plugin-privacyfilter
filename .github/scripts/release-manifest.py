@@ -97,6 +97,8 @@ EXPLICIT_KEYS = frozenset(
         "success_state_valid",
         "responses_lite_forward",
         "responses_lite_redacted",
+        "reasoning_replay_forward",
+        "reasoning_replay_preserved",
         "active_termination",
         "blocked_not_forwarded",
     )

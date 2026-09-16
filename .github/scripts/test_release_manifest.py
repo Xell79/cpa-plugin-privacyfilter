@@ -105,6 +105,8 @@ class ReleaseManifestTest(unittest.TestCase):
                 "success_state_valid": True,
                 "responses_lite_forward": True,
                 "responses_lite_redacted": True,
+                "reasoning_replay_forward": True,
+                "reasoning_replay_preserved": True,
                 "active_termination": True,
                 "blocked_not_forwarded": True,
             },
@@ -187,6 +189,8 @@ class ReleaseManifestTest(unittest.TestCase):
                 "success_state_valid",
                 "responses_lite_forward",
                 "responses_lite_redacted",
+                "reasoning_replay_forward",
+                "reasoning_replay_preserved",
                 "active_termination",
                 "blocked_not_forwarded",
             ):

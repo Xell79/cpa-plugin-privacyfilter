@@ -140,7 +140,11 @@ func walkOpenAIMessage(c *collector, message *node) error {
 	if message.kind != payload.KindObject {
 		return c.shape(message, "object", "messages element")
 	}
-	if err := c.unique(message, "role", "content", "tool_calls", "function_call", "name", "id", "call_id", "tool_call_id", "refusal", "audio"); err != nil {
+	if err := c.unique(
+		message,
+		"role", "content", "tool_calls", "function_call", "name", "id", "call_id", "tool_call_id",
+		"refusal", "audio", "reasoning", "reasoning_content", "reasoning_details",
+	); err != nil {
 		return err
 	}
 	for _, key := range []string{"name", "id", "call_id", "tool_call_id"} {
@@ -158,6 +162,9 @@ func walkOpenAIMessage(c *collector, message *node) error {
 	scope, roleOK := scopeForRole(roleNode.token.Value)
 	if !roleOK {
 		c.unsupportedValue(roleNode, "unknown message role ", roleNode.token.Value)
+	}
+	if err = walkOpenAIReasoningReplay(c, message, roleOK && scope == ScopeAssistant); err != nil {
+		return err
 	}
 
 	content, hasContent, err := c.field(message, "content")
@@ -230,6 +237,94 @@ func walkOpenAIMessage(c *collector, message *node) error {
 		if err = walkOpenAIFunction(c, legacy); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func walkOpenAIReasoningReplay(c *collector, message *node, assistant bool) error {
+	for _, key := range []string{"reasoning", "reasoning_content"} {
+		value, present, err := c.field(message, key)
+		if err != nil {
+			return err
+		}
+		if !present || value.kind == payload.KindNull {
+			continue
+		}
+		if value.kind != payload.KindString {
+			return c.shape(value, "string or null", key)
+		}
+		if assistant {
+			if err = c.markOpaque(value); err != nil {
+				return err
+			}
+		} else {
+			c.unsupported(value, key+" outside an assistant message")
+		}
+	}
+
+	details, present, err := c.field(message, "reasoning_details")
+	if err != nil || !present || details.kind == payload.KindNull {
+		return err
+	}
+	if details.kind != payload.KindArray {
+		return c.shape(details, "array or null", "reasoning_details")
+	}
+	if !assistant {
+		c.unsupported(details, "reasoning_details outside an assistant message")
+		return nil
+	}
+	for _, detail := range details.array {
+		if err = walkOpenAIReasoningDetail(c, detail); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func walkOpenAIReasoningDetail(c *collector, detail *node) error {
+	if detail.kind != payload.KindObject {
+		return c.shape(detail, "object", "reasoning_details element")
+	}
+	if err := c.uniqueObjectKeys(detail); err != nil {
+		return err
+	}
+	typeNode, _, err := c.stringField(detail, "type", true)
+	if err != nil {
+		return err
+	}
+	if err = c.markOpaque(typeNode); err != nil {
+		return err
+	}
+	for _, key := range []string{"id", "format"} {
+		if err = c.markOpaqueStringField(detail, key, false, true); err != nil {
+			return err
+		}
+	}
+	index, hasIndex, err := c.field(detail, "index")
+	if err != nil {
+		return err
+	}
+	if hasIndex && index.kind != payload.KindNumber && index.kind != payload.KindNull {
+		return c.shape(index, "number or null", "reasoning_details index")
+	}
+
+	switch typeNode.token.Value {
+	case "reasoning.text":
+		for _, key := range []string{"text", "signature"} {
+			if err = c.markOpaqueStringField(detail, key, false, true); err != nil {
+				return err
+			}
+		}
+	case "reasoning.summary":
+		if err = c.markOpaqueStringField(detail, "summary", true, false); err != nil {
+			return err
+		}
+	case "reasoning.encrypted":
+		if err = c.markOpaqueStringField(detail, "data", true, false); err != nil {
+			return err
+		}
+	default:
+		c.unsupportedValue(detail, "unknown reasoning_details type ", typeNode.token.Value)
 	}
 	return nil
 }

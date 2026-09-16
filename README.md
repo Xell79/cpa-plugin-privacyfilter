@@ -20,10 +20,12 @@ default.
 > the first immutable Release. The `v0.3.3` publication gate failed closed before
 > creating a Release because its expanded exact-Host assertion set was not yet in
 > the release-manifest validator. `v0.3.4` carries the Responses Lite/Codex
-> compatibility fix and the matching validator update; install it only after
-> GitHub marks that Release immutable, and only from its checksum-verified
-> artifacts. Never install a source-tree or development build; verify the exact
-> version and filenames before following the examples below.
+> compatibility fix and the matching validator update. `v0.3.5` adds validated
+> OpenRouter `reasoning_details` replay compatibility and value-free rejection
+> diagnostics. Install a version only after GitHub marks its Release immutable,
+> and only from its checksum-verified artifacts. Never install a source-tree or
+> development build; verify the exact version and filenames before following the
+> examples below.
 
 ## Security model
 
@@ -49,8 +51,9 @@ default.
 - Uses RPC schema 2 active termination. A rejected request is returned as a
   successful plugin RPC envelope with `Terminate: true`, so it is not forwarded
   merely because ordinary interceptor errors are fail-open in the Host.
-- Logs counts and bounded metadata only; the plugin does not log matched values
-  or request bodies.
+- Logs counts, constant failure categories, and bounded allowlisted schema paths
+  only. Unknown object keys are rendered as `<redacted>`; the plugin does not log
+  matched values, error details, or request bodies.
 
 This is **irreversible redaction**, not reversible tokenization. The plugin does
 not retain original values for restoration.
@@ -61,7 +64,7 @@ not retain original values for restoration.
 
 | `SourceFormat` | Request schema | Inspected data |
 |---|---|---|
-| `openai` | Chat Completions | message text, multipart text, legacy/current function arguments, tool-role output, function descriptions and parameter schemas |
+| `openai` | Chat Completions | message text, multipart text, legacy/current function arguments, tool-role output, function descriptions and parameter schemas; validated OpenRouter `reasoning`/`reasoning_content`/`reasoning_details` replay remains opaque and byte-preserved |
 | `openai-response` | Responses | instructions, input/replay text, prompt variables, Responses Lite `additional_tools`, function/custom/namespace/tool-search/web-search definitions, current tool history, function descriptions and input/output schemas, text-format schemas, and encoded Codex turn metadata |
 | `claude` | Anthropic Messages | top-level system, message text, `tool_use.input`, string/structured `tool_result.content`, tool descriptions and input schemas |
 | `gemini` | Gemini GenerateContent | system/content text, function arguments/results, executable code/results, display names, function descriptions and parameter/response schemas |
@@ -70,6 +73,8 @@ not retain original values for restoration.
 
 Known control and integrity fields remain opaque: model/role/type discriminators,
 tool names and IDs, call IDs, status values, signatures, encrypted reasoning,
+validated provider reasoning replay (`reasoning`, `reasoning_content`, and the
+`reasoning.text`/`reasoning.summary`/`reasoning.encrypted` detail union),
 binary/base64 payloads, explicitly enumerated URL/file references, and flat
 Codex `client_metadata` transport/session values. The encoded
 `x-codex-turn-metadata` object and additive unknown metadata are recursively
@@ -186,7 +191,7 @@ one canonical root library:
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.4_linux_amd64.zip
+unzip privacyfilter_0.3.5_linux_amd64.zip
 ```
 
 The archive contains exactly `privacyfilter.so` (`.dylib` on macOS, `.dll` on

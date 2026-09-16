@@ -6,7 +6,7 @@
 
 > **不要安装官方 Plugin Store 中名为 `privacyfilter` 的条目。** 截至 2026-09-15，该 [Store 记录](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/blob/main/registry.json) 属于 `rheodev`，并指向他们的旧版 v0.2.0 实现。此 `ahoo` 分支不会申请另一个冲突的 Store 标识。只应安装从本仓库不可变 Release 下载并校验过 checksum 的产物。
 >
-> 不要安装 `v0.3.0`：其产物集虽通过了 Release gate，但发布时仓库尚未启用 Release immutability。`v0.3.1` 的发布工作流 fail closed 后仍是未发布的 draft。`v0.3.2` 是首个不可变 Release。`v0.3.3` 因扩展后的 exact-Host assertion 尚未登记到 release-manifest validator，在创建 Release 前发布 gate 主动失败。`v0.3.4` 同时包含 Responses Lite/Codex 兼容修复和对应 validator 更新；只有 GitHub 将该 Release 标记为 immutable 后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
+> 不要安装 `v0.3.0`：其产物集虽通过了 Release gate，但发布时仓库尚未启用 Release immutability。`v0.3.1` 的发布工作流 fail closed 后仍是未发布的 draft。`v0.3.2` 是首个不可变 Release。`v0.3.3` 因扩展后的 exact-Host assertion 尚未登记到 release-manifest validator，在创建 Release 前发布 gate 主动失败。`v0.3.4` 同时包含 Responses Lite/Codex 兼容修复和对应 validator 更新；`v0.3.5` 新增经校验的 OpenRouter `reasoning_details` replay 兼容和无值拒绝诊断。只有 GitHub 将对应 Release 标记为 immutable 后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
 
 ## 安全模型
 
@@ -18,7 +18,7 @@
 - 为已知协议对象中的每个字符串分配一种明确处置：可脱敏内容、明确定义的不透明控制/完整性数据，或不支持。含未知字符串的扩展会 fail closed，不会被静默跳过。
 - 默认使用 `mode: redact`、`on_error: block`、内嵌规则、无模型/格式绕过、无 blocking rule ID。
 - 使用 RPC schema 2 主动终止。被拒绝的请求以成功的插件 RPC envelope 返回，并设置 `Terminate: true`，避免宿主因普通 interceptor error 的 fail-open 行为而继续转发。
-- 日志只包含计数和有界元数据；插件不会记录命中值或请求体。
+- 日志只包含计数、常量失败类别和经过 allowlist 限定的有界 schema 路径；未知对象键显示为 `<redacted>`。插件不会记录命中值、错误详情或请求体。
 
 这是**不可逆脱敏**，不是可恢复 tokenization。插件不会保留原始值供后续还原。
 
@@ -28,14 +28,14 @@
 
 | `SourceFormat` | 请求协议 | 检查内容 |
 |---|---|---|
-| `openai` | Chat Completions | 消息文本、多段文本、旧版/新版函数参数、tool role 输出、函数描述和参数 schema |
+| `openai` | Chat Completions | 消息文本、多段文本、旧版/新版函数参数、tool role 输出、函数描述和参数 schema；经校验的 OpenRouter `reasoning`/`reasoning_content`/`reasoning_details` replay 保持不透明且字节不变 |
 | `openai-response` | Responses | instructions、input/replay 文本、prompt variables、Responses Lite `additional_tools`、function/custom/namespace/tool-search/web-search 定义、当前工具历史、函数描述、输入/输出 schema、text-format schema，以及编码的 Codex turn metadata |
 | `claude` | Anthropic Messages | 顶层 system、消息文本、`tool_use.input`、字符串/结构化 `tool_result.content`、工具描述和 input schema |
 | `gemini` | Gemini GenerateContent | system/content 文本、函数参数/结果、可执行代码/结果、display name、函数描述和参数/响应 schema |
 | `interactions` | Interactions | system instruction、嵌套 input/steps/content、函数输入/输出、工具描述和 schema |
 | `gemini-cli` | Interactions 兼容别名 | 与 `interactions` 相同 |
 
-已知控制和完整性字段保持不透明，包括 model/role/type discriminator、工具名称和 ID、call ID、status、签名、加密 reasoning、二进制/base64 数据、明确定义的 URL/文件引用，以及 Codex `client_metadata` 的已知扁平传输/会话值。编码的 `x-codex-turn-metadata` 对象和新增的未知 metadata 会递归检查，而不会仅因客户端增加 telemetry 字段就返回兼容性 422；已知扁平传输 ID 保持不透明。不支持的 Responses 根级工具类型仍会被拒绝，而不是作为不透明对象转发。
+已知控制和完整性字段保持不透明，包括 model/role/type discriminator、工具名称和 ID、call ID、status、签名、加密 reasoning、经校验的 provider reasoning replay（`reasoning`、`reasoning_content` 以及 `reasoning.text`/`reasoning.summary`/`reasoning.encrypted` detail union）、二进制/base64 数据、明确定义的 URL/文件引用，以及 Codex `client_metadata` 的已知扁平传输/会话值。编码的 `x-codex-turn-metadata` 对象和新增的未知 metadata 会递归检查，而不会仅因客户端增加 telemetry 字段就返回兼容性 422；已知扁平传输 ID 保持不透明。不支持的 Responses 根级工具类型仍会被拒绝，而不是作为不透明对象转发。
 
 ### 结构化凭证字段
 
@@ -112,7 +112,7 @@
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.4_linux_amd64.zip
+unzip privacyfilter_0.3.5_linux_amd64.zip
 ```
 
 Archive 恰好包含一个 `privacyfilter.so`（macOS 为 `.dylib`，Windows 为 `.dll`），mode 为 `0755`，ZIP 时间戳固定。Release 还包含 `release-manifest.json`、`NOTICE`、`LICENSE` 和 `THIRD_PARTY_LICENSES.md`。
