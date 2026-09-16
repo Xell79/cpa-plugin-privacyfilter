@@ -10,7 +10,7 @@ readonly HOST_COMMIT='8335eac'
 readonly HOST_BUILD_DATE='2026-09-15T14:07:07Z'
 readonly MANAGEMENT_KEY='privacyfilter-harness-management'
 readonly CLIENT_KEY='privacyfilter-harness-client'
-readonly SYNTHETIC_MARKER='q7z'
+readonly -a SENSITIVE_MARKERS=('q7z' 'replay@example.test')
 
 library=''
 version=''
@@ -302,14 +302,16 @@ host_container="${prefix}-removed"
 
 log_files_scanned="$(find "$work_root/no-stanza/logs" "$work_root/explicit/logs" -type f -printf '.' | wc -c | tr -d '[:space:]')"
 log_files_scanned="$((log_files_scanned + 2))"
-if grep -aR -E -q -- "(^|[^[:alnum:]_])${SYNTHETIC_MARKER}([^[:alnum:]_]|$)" \
-  "$work_root/no-stanza/logs" \
-  "$work_root/no-stanza/stdout.log" \
-  "$work_root/explicit/logs" \
-  "$work_root/explicit/stdout.log"; then
-  printf 'synthetic marker appeared in isolated Host logs\n' >&2
-  exit 1
-fi
+for marker in "${SENSITIVE_MARKERS[@]}"; do
+  if grep -aR -F -q -- "$marker" \
+    "$work_root/no-stanza/logs" \
+    "$work_root/no-stanza/stdout.log" \
+    "$work_root/explicit/logs" \
+    "$work_root/explicit/stdout.log"; then
+    printf 'synthetic sensitive marker appeared in isolated Host logs\n' >&2
+    exit 1
+  fi
+done
 
 NO_STANZA_REPORT="$work_root/reports/no-stanza.json" \
 EXPLICIT_REPORT="$work_root/reports/explicit.json" \

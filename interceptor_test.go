@@ -1530,6 +1530,97 @@ func TestResponsesLiteCompatibilityRedactsWithoutRejecting(t *testing.T) {
 	}
 }
 
+func TestOpenAIReasoningDetailsReplayDoesNotRejectOrMutate(t *testing.T) {
+	p := newTestPlugin(t)
+	sensitive := strings.Join([]string{"person", "example.test"}, "@")
+	reasoningText := strings.Join([]string{"signed", "reasoning", "payload"}, "-")
+	body := mustMarshalTestJSON(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": sensitive},
+			map[string]any{
+				"role":              "assistant",
+				"content":           "answer",
+				"reasoning":         reasoningText,
+				"reasoning_content": reasoningText,
+				"reasoning_details": []any{map[string]any{
+					"type": "reasoning.text", "text": reasoningText,
+					"format": "unknown", "index": 0,
+				}},
+			},
+		},
+	})
+	result, err := p.sanitizeRequest(context.Background(), "openai", body)
+	if err != nil {
+		t.Fatal("OpenAI reasoning replay failed sanitization")
+	}
+	if result.unsupported != 0 || !result.changed {
+		t.Fatal("OpenAI reasoning replay was rejected or user text was not redacted")
+	}
+
+	var decoded map[string]any
+	if err = json.Unmarshal(result.body, &decoded); err != nil {
+		t.Fatal("sanitized OpenAI reasoning replay is not valid JSON")
+	}
+	messages, ok := decoded["messages"].([]any)
+	if !ok || len(messages) != 2 {
+		t.Fatal("sanitized OpenAI reasoning replay messages changed shape")
+	}
+	user, ok := messages[0].(map[string]any)
+	if !ok || user["content"] == sensitive {
+		t.Fatal("user content was not redacted")
+	}
+	assistant, ok := messages[1].(map[string]any)
+	if !ok || assistant["reasoning"] != reasoningText || assistant["reasoning_content"] != reasoningText {
+		t.Fatal("legacy reasoning replay fields were modified")
+	}
+	details, ok := assistant["reasoning_details"].([]any)
+	if !ok || len(details) != 1 {
+		t.Fatal("reasoning_details changed shape")
+	}
+	detail, ok := details[0].(map[string]any)
+	if !ok || detail["text"] != reasoningText || detail["type"] != "reasoning.text" || detail["format"] != "unknown" {
+		t.Fatal("reasoning_details replay data was modified")
+	}
+}
+
+func TestFailureDiagnosticsExposeOnlyAllowlistedPathKeys(t *testing.T) {
+	sensitiveKey := strings.Join([]string{"credential", "value"}, "-")
+	err := &unsupportedRequestShapeError{
+		count: 2,
+		paths: []payload.Path{
+			{payload.Key("messages"), payload.Index(7), payload.Key("reasoning_details"), payload.Index(0), payload.Key("text")},
+			{payload.Key("input"), payload.Index(1), payload.Key(sensitiveKey)},
+		},
+	}
+	fields := failureLogFields("openai", err)
+	if fields["issue_category"] != "unsupported_shape" || fields["issue_count"] != 2 {
+		t.Fatal("failure diagnostic category or count mismatch")
+	}
+	paths, ok := fields["issue_paths"].(string)
+	if !ok || !strings.Contains(paths, `$["messages"][7]["reasoning_details"][0]["text"]`) ||
+		!strings.Contains(paths, `$["input"][1]["<redacted>"]`) {
+		t.Fatal("failure diagnostic paths did not preserve safe structure")
+	}
+	if strings.Contains(paths, sensitiveKey) {
+		t.Fatal("failure diagnostic exposed an untrusted object key")
+	}
+}
+
+func TestEncodedFailureDiagnosticRetainsOnlyOuterSafePath(t *testing.T) {
+	err := &targetInspectionError{
+		path:  payload.Path{payload.Key("client_metadata"), payload.Key("x-codex-turn-metadata")},
+		cause: errors.Join(errUnsupportedRequestShape, payload.ErrInvalidJSON),
+	}
+	category, count, paths := failureDiagnostic(err)
+	if category != "encoded_json_invalid" || count != 1 || len(paths) != 1 ||
+		paths[0] != `$["client_metadata"]["x-codex-turn-metadata"]` {
+		t.Fatal("encoded target failure diagnostic mismatch")
+	}
+	if !errors.Is(err, errUnsupportedRequestShape) || !errors.Is(err, payload.ErrInvalidJSON) {
+		t.Fatal("encoded target failure lost error classification")
+	}
+}
+
 func TestResponsesLiteMalformedTurnMetadataTerminates(t *testing.T) {
 	body := mustMarshalTestJSON(t, map[string]any{
 		"client_metadata": map[string]any{

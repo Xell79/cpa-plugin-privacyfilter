@@ -14,6 +14,34 @@ import (
 	"github.com/ahoo/cpa-plugin-privacyfilter/walker"
 )
 
+const maxFailureDiagnosticPaths = 4
+
+type unsupportedRequestShapeError struct {
+	count int
+	paths []payload.Path
+}
+
+func (e *unsupportedRequestShapeError) Error() string {
+	return "privacyfilter: unsupported request shape"
+}
+
+func (e *unsupportedRequestShapeError) Unwrap() error {
+	return errUnsupportedRequestShape
+}
+
+type targetInspectionError struct {
+	path  payload.Path
+	cause error
+}
+
+func (e *targetInspectionError) Error() string {
+	return "privacyfilter: request target inspection failed"
+}
+
+func (e *targetInspectionError) Unwrap() error {
+	return e.cause
+}
+
 type sanitizeResult struct {
 	body        []byte
 	changed     bool
@@ -170,7 +198,14 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 	result.opaque = walked.Opaque
 	result.unsupported = walked.UnsupportedCount
 	if walked.UnsupportedCount > 0 {
-		return result, fmt.Errorf("%w: %d protocol block(s)", errUnsupportedRequestShape, walked.UnsupportedCount)
+		paths := make([]payload.Path, 0, min(walked.UnsupportedCount, maxFailureDiagnosticPaths))
+		for _, issue := range walked.Unsupported {
+			if len(paths) == maxFailureDiagnosticPaths {
+				break
+			}
+			paths = append(paths, issue.Path.Clone())
+		}
+		return result, &unsupportedRequestShapeError{count: walked.UnsupportedCount, paths: paths}
 	}
 
 	budget, err := privacyengine.NewBudget(p.cfg.engineLimits())
@@ -196,7 +231,7 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 		}
 		value, findings, changed, err := p.sanitizeTarget(ctx, target, inspectionBudget, renderer)
 		if err != nil {
-			return result, err
+			return result, &targetInspectionError{path: target.Path.Clone(), cause: err}
 		}
 		result.findings += findings
 		if changed && p.cfg.Mode != modeAudit {

@@ -183,6 +183,50 @@ func TestValidRedactedResponsesLiteRequest(t *testing.T) {
 	}
 }
 
+func TestValidReasoningReplayRequest(t *testing.T) {
+	valid := []byte(`{
+	  "model":"mock-model",
+	  "messages":[
+	    {"role":"user","content":"[邮箱]"},
+	    {
+	      "role":"assistant",
+	      "content":"answer",
+	      "reasoning":"integrity-replay-value",
+	      "reasoning_content":"integrity-replay-value",
+	      "reasoning_details":[
+	        {"type":"reasoning.text","text":"integrity-replay-value","signature":"integrity-signature","id":"rd_1","format":"unknown","index":0},
+	        {"type":"reasoning.summary","summary":"integrity-replay-value","id":"rd_2","format":"openai-responses-v1","index":1},
+	        {"type":"reasoning.encrypted","data":"integrity-replay-value","id":"rd_3","format":"anthropic-claude-v1","index":2}
+	      ]
+	    }
+	  ]
+	}`)
+	if !validReasoningReplayRequest(valid) {
+		t.Fatal("exact reasoning replay request was rejected")
+	}
+
+	cases := [][]byte{
+		nil,
+		[]byte(`{}`),
+		bytes.Replace(valid, []byte(`"model":"mock-model"`), []byte(`"model":"other"`), 1),
+		bytes.Replace(valid, []byte(`"content":"[邮箱]"`), []byte(`"content":"replay@example.test"`), 1),
+		bytes.Replace(valid, []byte(`"content":"answer"`), []byte(`"content":"other"`), 1),
+		bytes.Replace(valid, []byte(`"reasoning":"integrity-replay-value"`), []byte(`"reasoning":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"reasoning_content":"integrity-replay-value"`), []byte(`"reasoning_content":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"text":"integrity-replay-value"`), []byte(`"text":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"signature":"integrity-signature"`), []byte(`"signature":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"summary":"integrity-replay-value"`), []byte(`"summary":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"data":"integrity-replay-value"`), []byte(`"data":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"format":"unknown"`), []byte(`"format":"changed"`), 1),
+		bytes.Replace(valid, []byte(`"index":0`), []byte(`"index":9`), 1),
+	}
+	for index, body := range cases {
+		if validReasoningReplayRequest(body) {
+			t.Fatalf("invalid reasoning replay request accepted index=%d body_len=%d", index, len(body))
+		}
+	}
+}
+
 func TestSummarizePluginStateIsBoundedAndValueFree(t *testing.T) {
 	response := pluginListResponse{
 		PluginsEnabled: true,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/ahoo/cpa-plugin-privacyfilter/internal/privacyengine"
@@ -107,6 +108,7 @@ func (p *privacyFilterPlugin) interceptRequest(ctx context.Context, req pluginap
 func (p *privacyFilterPlugin) handleFailure(sourceFormat string, err error) pluginapi.RequestInterceptResponse {
 	var blocked *blockedFindingError
 	if errors.As(err, &blocked) {
+		log.WithFields(failureLogFields(sourceFormat, err)).Warn("privacyfilter: request blocked by privacy policy")
 		return terminateRequest(
 			sourceFormat,
 			http.StatusUnprocessableEntity,
@@ -115,10 +117,7 @@ func (p *privacyFilterPlugin) handleFailure(sourceFormat string, err error) plug
 		)
 	}
 	if p.cfg.OnError == onErrorPassthrough {
-		log.WithFields(log.Fields{
-			"source_format": safeLogValue(sourceFormat),
-			"reason":        failureReason(err),
-		}).Warn("privacyfilter: inspection failed; request passed through by configuration")
+		log.WithFields(failureLogFields(sourceFormat, err)).Warn("privacyfilter: inspection failed; request passed through by configuration")
 		return pluginapi.RequestInterceptResponse{}
 	}
 
@@ -139,7 +138,119 @@ func (p *privacyFilterPlugin) handleFailure(sourceFormat string, err error) plug
 		code = "privacy_filter_invalid_json"
 		message = "request body is not valid JSON"
 	}
+	log.WithFields(failureLogFields(sourceFormat, err)).Warn("privacyfilter: request inspection blocked")
 	return terminateRequest(sourceFormat, status, code, message)
+}
+
+func failureLogFields(sourceFormat string, err error) log.Fields {
+	fields := log.Fields{
+		"source_format": safeLogValue(sourceFormat),
+		"reason":        failureReason(err),
+	}
+	category, count, paths := failureDiagnostic(err)
+	if category != "" {
+		fields["issue_category"] = category
+	}
+	if count > 0 {
+		fields["issue_count"] = count
+	}
+	if len(paths) > 0 {
+		fields["issue_paths"] = strings.Join(paths, ",")
+	}
+	return fields
+}
+
+func failureDiagnostic(err error) (string, int, []string) {
+	var unsupported *unsupportedRequestShapeError
+	if errors.As(err, &unsupported) {
+		return "unsupported_shape", unsupported.count, safeDiagnosticPaths(unsupported.paths)
+	}
+	var target *targetInspectionError
+	if errors.As(err, &target) {
+		category := "target_inspection"
+		switch {
+		case isLimitError(target.cause):
+			category = "target_limit"
+		case isJSONError(target.cause):
+			category = "encoded_json_invalid"
+		case isUnsupportedError(target.cause):
+			category = "target_unsupported"
+		}
+		return category, 1, []string{safeDiagnosticPath(target.path)}
+	}
+	var shape *walker.ShapeError
+	if errors.As(err, &shape) {
+		return "invalid_shape", 1, []string{safeDiagnosticPath(shape.Path)}
+	}
+	var ambiguity *walker.AmbiguityError
+	if errors.As(err, &ambiguity) {
+		return "ambiguous_path", 1, []string{safeDiagnosticPath(ambiguity.Path)}
+	}
+	var unsupportedShape walker.UnsupportedShape
+	if errors.As(err, &unsupportedShape) {
+		return "unsupported_shape", 1, []string{safeDiagnosticPath(unsupportedShape.Path)}
+	}
+	return "", 0, nil
+}
+
+func safeDiagnosticPaths(paths []payload.Path) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, min(len(paths), maxFailureDiagnosticPaths))
+	for _, path := range paths {
+		if len(out) == maxFailureDiagnosticPaths {
+			break
+		}
+		out = append(out, safeDiagnosticPath(path))
+	}
+	return out
+}
+
+func safeDiagnosticPath(path payload.Path) string {
+	const maxSegments = 32
+	var out strings.Builder
+	out.WriteByte('$')
+	for index, segment := range path {
+		if index == maxSegments {
+			out.WriteString(`["<truncated>"]`)
+			break
+		}
+		if key, ok := segment.KeyValue(); ok {
+			if !safeDiagnosticKey(key) {
+				key = "<redacted>"
+			}
+			out.WriteByte('[')
+			out.WriteString(strconv.Quote(key))
+			out.WriteByte(']')
+			continue
+		}
+		if arrayIndex, ok := segment.IndexValue(); ok {
+			out.WriteByte('[')
+			out.WriteString(strconv.Itoa(arrayIndex))
+			out.WriteByte(']')
+			continue
+		}
+		out.WriteString(`["<invalid>"]`)
+	}
+	return out.String()
+}
+
+func safeDiagnosticKey(key string) bool {
+	switch key {
+	case "messages", "message", "content", "role", "type", "text", "input", "output",
+		"reasoning", "reasoning_content", "reasoning_details", "summary", "data", "signature",
+		"encrypted_content", "format", "index", "id", "call_id", "tool_call_id", "name",
+		"namespace", "status", "arguments", "function_call", "function_call_output", "tool_calls",
+		"function", "custom_tool_call", "custom_tool_call_output", "additional_tools", "tools",
+		"client_metadata", "x-codex-turn-metadata", "instructions", "prompt", "variables",
+		"description", "parameters", "properties", "items", "schema", "input_schema", "output_schema",
+		"system", "system_instruction", "parts", "contents", "candidates", "steps", "result",
+		"action", "command", "environment", "code", "logs", "annotations", "metadata":
+		return true
+	default:
+		return false
+	}
 }
 
 func failureReason(err error) string {
