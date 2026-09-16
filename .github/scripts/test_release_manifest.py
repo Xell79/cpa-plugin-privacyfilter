@@ -57,9 +57,9 @@ class ReleaseManifestTest(unittest.TestCase):
             "official_host": {
                 "image_reference": "test-registry/official-host",
                 "image_digest": "sha256:" + "a" * 64,
-                "version": "v7.3.3",
-                "commit": "abc1234",
-                "build_date": "2026-09-14T19:44:01Z",
+                "version": "v7.3.4",
+                "commit": "8335eac",
+                "build_date": "2026-09-15T14:07:07Z",
             },
             "plugin": {
                 "id": "privacyfilter",
@@ -103,6 +103,8 @@ class ReleaseManifestTest(unittest.TestCase):
                 "value_redacted": True,
                 "marker_not_forwarded": True,
                 "success_state_valid": True,
+                "responses_lite_forward": True,
+                "responses_lite_redacted": True,
                 "active_termination": True,
                 "blocked_not_forwarded": True,
             },
@@ -162,9 +164,9 @@ class ReleaseManifestTest(unittest.TestCase):
             self.assertEqual(integration["schema_version"], 1)
             self.assertEqual(integration["source_revision"], revision)
             self.assertTrue(integration["official_host"]["image_digest"].startswith("sha256:"))
-            self.assertEqual(integration["official_host"]["version"], "v7.3.3")
-            self.assertEqual(integration["official_host"]["commit"], "abc1234")
-            self.assertEqual(integration["official_host"]["build_date"], "2026-09-14T19:44:01Z")
+            self.assertEqual(integration["official_host"]["version"], "v7.3.4")
+            self.assertEqual(integration["official_host"]["commit"], "8335eac")
+            self.assertEqual(integration["official_host"]["build_date"], "2026-09-15T14:07:07Z")
             self.assertEqual(
                 integration["plugin"]["library_sha256"], hashlib.sha256(b"linux/amd64").hexdigest()
             )
@@ -183,6 +185,8 @@ class ReleaseManifestTest(unittest.TestCase):
                 "marker_not_forwarded",
                 "successful_forward",
                 "success_state_valid",
+                "responses_lite_forward",
+                "responses_lite_redacted",
                 "active_termination",
                 "blocked_not_forwarded",
             ):

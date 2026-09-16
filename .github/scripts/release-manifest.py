@@ -95,6 +95,8 @@ EXPLICIT_KEYS = frozenset(
         "value_redacted",
         "marker_not_forwarded",
         "success_state_valid",
+        "responses_lite_forward",
+        "responses_lite_redacted",
         "active_termination",
         "blocked_not_forwarded",
     )
