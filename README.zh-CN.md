@@ -6,7 +6,7 @@
 
 > **不要安装官方 Plugin Store 中名为 `privacyfilter` 的条目。** 截至 2026-09-15，该 [Store 记录](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/blob/main/registry.json) 属于 `rheodev`，并指向他们的旧版 v0.2.0 实现。此 `ahoo` 分支不会申请另一个冲突的 Store 标识。只应安装从本仓库不可变 Release 下载并校验过 checksum 的产物。
 >
-> 不要安装 `v0.3.0`：其产物集虽通过了 Release gate，但发布时仓库尚未启用 Release immutability。`v0.3.1` 的发布工作流 fail closed 后仍是未发布的 draft。`v0.3.2` 是首个不可变 Release。`v0.3.3` 增加当前 Responses Lite/Codex 请求兼容；只有 GitHub 将该 Release 标记为 immutable 后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
+> 不要安装 `v0.3.0`：其产物集虽通过了 Release gate，但发布时仓库尚未启用 Release immutability。`v0.3.1` 的发布工作流 fail closed 后仍是未发布的 draft。`v0.3.2` 是首个不可变 Release。`v0.3.3` 因扩展后的 exact-Host assertion 尚未登记到 release-manifest validator，在创建 Release 前发布 gate 主动失败。`v0.3.4` 同时包含 Responses Lite/Codex 兼容修复和对应 validator 更新；只有 GitHub 将该 Release 标记为 immutable 后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
 
 ## 安全模型
 
@@ -112,7 +112,7 @@
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.3_linux_amd64.zip
+unzip privacyfilter_0.3.4_linux_amd64.zip
 ```
 
 Archive 恰好包含一个 `privacyfilter.so`（macOS 为 `.dylib`，Windows 为 `.dll`），mode 为 `0755`，ZIP 时间戳固定。Release 还包含 `release-manifest.json`、`NOTICE`、`LICENSE` 和 `THIRD_PARTY_LICENSES.md`。

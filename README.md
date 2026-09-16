@@ -17,11 +17,13 @@ default.
 > Do not install `v0.3.0`: its artifact set passed the release gates, but it was
 > published before repository release immutability was enabled. `v0.3.1` remained
 > an unpublished draft after its publication workflow failed closed. `v0.3.2` was
-> the first immutable Release. `v0.3.3` adds current Responses Lite/Codex request
-> compatibility; install it only after GitHub marks that Release immutable, and
-> only from its checksum-verified artifacts. Never install a source-tree or
-> development build; verify the exact version and filenames before following the
-> examples below.
+> the first immutable Release. The `v0.3.3` publication gate failed closed before
+> creating a Release because its expanded exact-Host assertion set was not yet in
+> the release-manifest validator. `v0.3.4` carries the Responses Lite/Codex
+> compatibility fix and the matching validator update; install it only after
+> GitHub marks that Release immutable, and only from its checksum-verified
+> artifacts. Never install a source-tree or development build; verify the exact
+> version and filenames before following the examples below.
 
 ## Security model
 
@@ -184,7 +186,7 @@ one canonical root library:
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.3_linux_amd64.zip
+unzip privacyfilter_0.3.4_linux_amd64.zip
 ```
 
 The archive contains exactly `privacyfilter.so` (`.dylib` on macOS, `.dll` on
