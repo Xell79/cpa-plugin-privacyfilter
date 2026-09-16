@@ -113,6 +113,42 @@ func (c *collector) unique(object *node, keys ...string) error {
 	return nil
 }
 
+func (c *collector) uniqueObjectKeys(object *node) error {
+	if object == nil || object.kind != payload.KindObject {
+		return c.shape(object, "object", "duplicate-field validation")
+	}
+	if len(object.object) < 2 {
+		return nil
+	}
+	maxInt := int(^uint(0) >> 1)
+	if len(object.object) > maxInt/retainedTreeIndexEntryBytes {
+		return fmt.Errorf("%w: duplicate-field index size overflow", payload.ErrStructuralLimit)
+	}
+	if c.budget == nil {
+		return errorsInternal("collector structural budget is unavailable")
+	}
+	if err := c.budget.retain(len(object.object) * retainedTreeIndexEntryBytes); err != nil {
+		return err
+	}
+	keys := make([]string, len(object.object))
+	for index, entry := range object.object {
+		keys[index] = entry.key
+	}
+	sort.Strings(keys)
+	for index := 1; index < len(keys); index++ {
+		if keys[index] != keys[index-1] {
+			continue
+		}
+		key := keys[index]
+		return &AmbiguityError{
+			Protocol: c.protocol,
+			Path:     append(object.path.Clone(), payload.Key(key)),
+			Keys:     []string{key},
+		}
+	}
+	return nil
+}
+
 func (c *collector) shape(value *node, expected, detail string) error {
 	if c.err != nil {
 		return c.err

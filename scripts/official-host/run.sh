@@ -3,11 +3,11 @@
 set -euo pipefail
 
 readonly HOST_IMAGE_REPOSITORY='eceasy/cli-proxy-api'
-readonly HOST_IMAGE_DIGEST='sha256:f9abbf3fa5fed1ca5410cf207eeae6d7c3d7d1b5305397fc928d4d43d4474d15'
+readonly HOST_IMAGE_DIGEST='sha256:97825da3009f98acf78b5c172fde650a5fbe7a690950a69ce6d7b535d77d4266'
 readonly HOST_IMAGE="${HOST_IMAGE_REPOSITORY}@${HOST_IMAGE_DIGEST}"
-readonly HOST_VERSION='v7.3.3'
-readonly HOST_COMMIT='7bbfeaf'
-readonly HOST_BUILD_DATE='2026-09-14T19:44:01Z'
+readonly HOST_VERSION='v7.3.4'
+readonly HOST_COMMIT='8335eac'
+readonly HOST_BUILD_DATE='2026-09-15T14:07:07Z'
 readonly MANAGEMENT_KEY='privacyfilter-harness-management'
 readonly CLIENT_KEY='privacyfilter-harness-client'
 readonly SYNTHETIC_MARKER='q7z'
@@ -253,10 +253,16 @@ openai-compatibility:
   - name: "harness"
     base-url: "http://mock:9000/v1"
     api-key-entries:
-      - api-key: "privacyfilter-harness-upstream"
+      - api-key: "privacyfilter-harness-chat-upstream"
     models:
       - name: "mock-model"
         alias: "mock-model"
+codex-api-key:
+  - api-key: "privacyfilter-harness-responses-upstream"
+    base-url: "http://mock:9000/v1"
+    models:
+      - name: "mock-model"
+        alias: "mock-responses-model"
 YAML
 
 docker run -d \
