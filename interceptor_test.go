@@ -1426,7 +1426,6 @@ func TestStringBearingProtocolExtensionsTerminateWith422(t *testing.T) {
 		{"responses safety check", "openai-response", `{"input":[{"type":"computer_call","pending_safety_checks":[{"id":"safe_1","message":"control","future":"extension"}],"action":{"type":"wait"}}]}`},
 		{"responses image revised prompt", "openai-response", `{"input":[{"type":"image_generation_call","id":"ig_1","status":"completed","result":"base64","revised_prompt":"visible prompt"}]}`},
 		{"responses tool-search output", "openai-response", `{"input":[{"type":"tool_search_output","id":"tso_1","tools":[]}]}`},
-		{"responses additional tools", "openai-response", `{"input":[{"type":"additional_tools","id":"at_1","role":"developer","tools":[]}]}`},
 		{"responses program", "openai-response", `{"input":[{"type":"program","id":"pg_1","code":"replay code","fingerprint":"fingerprint"}]}`},
 		{"responses URL citation", "openai-response", `{"input":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"answer","annotations":[{"type":"url_citation","start_index":0,"end_index":6,"title":"title","url":"https://example.invalid"}]}]}]}`},
 		{"responses output logprobs", "openai-response", `{"input":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"a","annotations":[],"logprobs":[{"token":"a","bytes":[97],"logprob":-0.1,"top_logprobs":[]}]}]}]}`},
@@ -1449,6 +1448,104 @@ func TestStringBearingProtocolExtensionsTerminateWith422(t *testing.T) {
 				t.Fatal("string-bearing extension did not terminate with 422")
 			}
 		})
+	}
+}
+
+func TestResponsesLiteCompatibilityRedactsWithoutRejecting(t *testing.T) {
+	p := newTestPlugin(t)
+	shortCredential := strings.Join([]string{"q", "7", "z"}, "")
+	sensitiveEmail := strings.Join([]string{"person", "example.test"}, "@")
+	sessionID := strings.Join([]string{"session", "1"}, "_")
+	turnMetadata := mustMarshalTestJSON(t, map[string]any{
+		"api_key":   shortCredential,
+		"workspace": map[string]any{"label": "ordinary"},
+	})
+	customInput := mustMarshalTestJSON(t, map[string]any{"AK": shortCredential})
+	body := mustMarshalTestJSON(t, map[string]any{
+		"client_metadata": map[string]any{
+			"session_id":              sessionID,
+			"x-codex-installation-id": "installation_1",
+			"x-codex-window-id":       "window_1",
+			"thread_id":               "thread_1",
+			"turn_id":                 "turn_1",
+			"root_turn_id":            "root_1",
+			"x-codex-turn-metadata":   string(turnMetadata),
+			"future_transport_key":    map[string]any{"api_key": shortCredential},
+		},
+		"input": []any{
+			map[string]any{
+				"type": "additional_tools", "id": "at_1", "role": "developer",
+				"tools": []any{map[string]any{
+					"type": "namespace", "name": "functions", "description": sensitiveEmail,
+					"tools": []any{
+						map[string]any{
+							"type": "function", "name": "lookup", "description": sensitiveEmail,
+							"parameters": map[string]any{"type": "object"},
+						},
+						map[string]any{
+							"type": "custom", "name": "freeform", "description": sensitiveEmail,
+							"format": map[string]any{"type": "grammar", "syntax": "lark", "definition": "start: WORD"},
+						},
+					},
+				}},
+			},
+			map[string]any{
+				"type": "custom_tool_call", "id": "ct_1", "call_id": "call_1",
+				"name": "freeform", "status": "completed", "input": string(customInput),
+				"internal_chat_message_metadata_passthrough": map[string]any{
+					"executed_tool_calls": []any{map[string]any{
+						"arguments": map[string]any{"api_key": shortCredential},
+					}},
+				},
+			},
+		},
+	})
+
+	result, err := p.sanitizeRequest(context.Background(), "openai-response", body)
+	if err != nil {
+		t.Fatal("Responses Lite compatibility request failed sanitization")
+	}
+	if result.unsupported != 0 || !result.changed || result.findings < 2 {
+		t.Fatal("Responses Lite compatibility request was not fully inspected")
+	}
+	if bytes.Contains(result.body, []byte(shortCredential)) || bytes.Contains(result.body, []byte(sensitiveEmail)) {
+		t.Fatal("Responses Lite sensitive values survived redaction")
+	}
+
+	var decoded map[string]any
+	if err = json.Unmarshal(result.body, &decoded); err != nil {
+		t.Fatal("sanitized Responses Lite body is not valid JSON")
+	}
+	metadata, ok := decoded["client_metadata"].(map[string]any)
+	if !ok || metadata["session_id"] != sessionID {
+		t.Fatal("client transport metadata was not preserved")
+	}
+	items, ok := decoded["input"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatal("sanitized Responses Lite input shape changed")
+	}
+	call, ok := items[1].(map[string]any)
+	if !ok || call["status"] != "completed" {
+		t.Fatal("custom tool call status was not preserved")
+	}
+}
+
+func TestResponsesLiteMalformedTurnMetadataTerminates(t *testing.T) {
+	body := mustMarshalTestJSON(t, map[string]any{
+		"client_metadata": map[string]any{
+			"x-codex-turn-metadata": "{not-json",
+		},
+		"input": "ok",
+	})
+	resp, err := newTestPlugin(t).InterceptRequestBeforeAuth(
+		context.Background(),
+		pluginapi.RequestInterceptRequest{SourceFormat: "openai-response", Body: body},
+	)
+	if err != nil {
+		t.Fatal("interceptor returned an error")
+	}
+	if !resp.Terminate || resp.StatusCode != 422 {
+		t.Fatal("malformed encoded turn metadata did not terminate with 422")
 	}
 }
 

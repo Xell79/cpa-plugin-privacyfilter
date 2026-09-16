@@ -6,7 +6,7 @@
 
 > **不要安装官方 Plugin Store 中名为 `privacyfilter` 的条目。** 截至 2026-09-15，该 [Store 记录](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/blob/main/registry.json) 属于 `rheodev`，并指向他们的旧版 v0.2.0 实现。此 `ahoo` 分支不会申请另一个冲突的 Store 标识。只应安装从本仓库不可变 Release 下载并校验过 checksum 的产物。
 >
-> 不要安装 `v0.3.0`：其产物集虽通过了 Release gate，但发布时仓库尚未启用 Release immutability。`v0.3.1` 的发布工作流 fail closed 后仍是未发布的 draft。`v0.3.2` 是 immutability 策略下的下一个候选版本。只有 GitHub 将其标记为 immutable 后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
+> 不要安装 `v0.3.0`：其产物集虽通过了 Release gate，但发布时仓库尚未启用 Release immutability。`v0.3.1` 的发布工作流 fail closed 后仍是未发布的 draft。`v0.3.2` 是首个不可变 Release。`v0.3.3` 增加当前 Responses Lite/Codex 请求兼容；只有 GitHub 将该 Release 标记为 immutable 后，才可安装其中通过 checksum 校验的产物。不要安装源码树或开发 build；执行下方示例前，应核对精确版本和文件名。
 
 ## 安全模型
 
@@ -29,13 +29,13 @@
 | `SourceFormat` | 请求协议 | 检查内容 |
 |---|---|---|
 | `openai` | Chat Completions | 消息文本、多段文本、旧版/新版函数参数、tool role 输出、函数描述和参数 schema |
-| `openai-response` | Responses | instructions、input/replay 文本、prompt variables，以及 pinned input-item union 已覆盖的 function/custom/MCP/shell/search/code/tool 历史、函数描述、输入/输出 schema 和 text-format schema |
+| `openai-response` | Responses | instructions、input/replay 文本、prompt variables、Responses Lite `additional_tools`、function/custom/namespace/tool-search/web-search 定义、当前工具历史、函数描述、输入/输出 schema、text-format schema，以及编码的 Codex turn metadata |
 | `claude` | Anthropic Messages | 顶层 system、消息文本、`tool_use.input`、字符串/结构化 `tool_result.content`、工具描述和 input schema |
 | `gemini` | Gemini GenerateContent | system/content 文本、函数参数/结果、可执行代码/结果、display name、函数描述和参数/响应 schema |
 | `interactions` | Interactions | system instruction、嵌套 input/steps/content、函数输入/输出、工具描述和 schema |
 | `gemini-cli` | Interactions 兼容别名 | 与 `interactions` 相同 |
 
-已知控制和完整性字段保持不透明，包括 model/role/type discriminator、工具名称和 ID、call ID、签名、加密 reasoning、二进制/base64 数据以及明确定义的 URL/文件引用。不支持的 Responses 根级工具类型会被拒绝，而不是作为不透明对象转发。
+已知控制和完整性字段保持不透明，包括 model/role/type discriminator、工具名称和 ID、call ID、status、签名、加密 reasoning、二进制/base64 数据、明确定义的 URL/文件引用，以及 Codex `client_metadata` 的已知扁平传输/会话值。编码的 `x-codex-turn-metadata` 对象和新增的未知 metadata 会递归检查，而不会仅因客户端增加 telemetry 字段就返回兼容性 422；已知扁平传输 ID 保持不透明。不支持的 Responses 根级工具类型仍会被拒绝，而不是作为不透明对象转发。
 
 ### 结构化凭证字段
 
@@ -112,14 +112,14 @@
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.2_linux_amd64.zip
+unzip privacyfilter_0.3.3_linux_amd64.zip
 ```
 
 Archive 恰好包含一个 `privacyfilter.so`（macOS 为 `.dylib`，Windows 为 `.dll`），mode 为 `0755`，ZIP 时间戳固定。Release 还包含 `release-manifest.json`、`NOTICE`、`LICENSE` 和 `THIRD_PARTY_LICENSES.md`。
 
 只把校验过的库放入宿主 native plugin discovery 目录。不要复制本地开发 build 或历史遗留且被忽略的 `dist/privacyfilter.so`。Linux 上 Go shared library 使用 `DF_1_NODELETE` 加载，因此加载、替换或移除插件后都必须重启 CLIProxyAPI 进程。
 
-宿主的全局 plugin subsystem 必须已启用，并且该库必须处于 effective enabled 状态。已发现但没有 config stanza 的库是否自动启用取决于宿主版本；应检查经过字段白名单投影后的 management 状态，不能假设发现即执行。本 Release gate 使用的官方 v7.3.3 精确镜像会发现但禁用未配置的库，因此该版本要求显式启用。最小宿主 stanza 为：
+宿主的全局 plugin subsystem 必须已启用，并且该库必须处于 effective enabled 状态。已发现但没有 config stanza 的库是否自动启用取决于宿主版本；应检查经过字段白名单投影后的 management 状态，不能假设发现即执行。本 Release gate 使用的官方 v7.3.4 精确镜像会发现但禁用未配置的库，因此该版本要求显式启用。最小宿主 stanza 为：
 
 ```yaml
 plugins:

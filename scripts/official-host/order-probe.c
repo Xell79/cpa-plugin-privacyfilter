@@ -148,12 +148,16 @@ static int probe_call(char *method, uint8_t *request, size_t request_len,
         return write_response(high_after_response, response);
 #elif PROBE_KIND == 2
         if (!contains_bytes(request, request_len, "X-Order-After") ||
-            !contains_bytes(request, request_len, "high") ||
-            !contains_bytes(request, request_len, redacted_before_body)) {
+            !contains_bytes(request, request_len, "high")) {
             return write_response(order_failure_response, response);
         }
+        // Non-Chat protocol canaries preserve their original body while still
+        // proving that the high-priority interceptor ran before this probe.
         if (contains_bytes(request, request_len, "X-Harness-Block")) {
             return write_response(low_after_block_response, response);
+        }
+        if (!contains_bytes(request, request_len, redacted_before_body)) {
+            return write_response(order_failure_response, response);
         }
         return write_response(low_after_response, response);
 #endif

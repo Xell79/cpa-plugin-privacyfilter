@@ -3,7 +3,10 @@ package walker
 import "github.com/ahoo/cpa-plugin-privacyfilter/payload"
 
 func walkResponses(c *collector, root *node) error {
-	if err := c.unique(root, "instructions", "input", "prompt", "context_management", "conversation", "tools"); err != nil {
+	if err := c.unique(
+		root,
+		"instructions", "input", "prompt", "context_management", "conversation", "tools", "client_metadata",
+	); err != nil {
 		return err
 	}
 	if err := walkResponsesRootControls(c, root); err != nil {
@@ -49,13 +52,20 @@ func walkResponses(c *collector, root *node) error {
 		}
 	}
 
+	if err = walkResponsesClientMetadata(c, root); err != nil {
+		return err
+	}
+
 	tools, hasTools, err := c.field(root, "tools")
 	if err != nil {
 		return err
 	}
 	if hasTools {
-		return walkResponsesRootTools(c, tools)
+		if err = walkResponsesRootTools(c, tools); err != nil {
+			return err
+		}
 	}
+
 	return nil
 }
 
@@ -130,6 +140,100 @@ func markResponsesOpaqueStringFields(c *collector, object *node, keys ...string)
 	for _, key := range keys {
 		if err := c.markOpaqueStringField(object, key, false, true); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func walkResponsesClientMetadata(c *collector, root *node) error {
+	metadata, present, err := responsesFieldOfKind(
+		c,
+		root,
+		"client_metadata",
+		payload.KindObject,
+		false,
+		true,
+	)
+	if err != nil || !present {
+		return err
+	}
+	if err = c.uniqueObjectKeys(metadata); err != nil {
+		return err
+	}
+	for _, entry := range metadata.object {
+		if entry.key == "x-codex-turn-metadata" {
+			switch entry.value.kind {
+			case payload.KindNull:
+				continue
+			case payload.KindString:
+				if err = c.add(
+					entry.value,
+					ScopeToolInput,
+					TargetKindEncodedJSON,
+					MutabilityEncodedJSON,
+				); err != nil {
+					return err
+				}
+				continue
+			default:
+				return c.shape(entry.value, "string or null", "x-codex-turn-metadata")
+			}
+		}
+		if isResponsesClientMetadataControl(entry.key) {
+			if entry.value.kind == payload.KindNull {
+				continue
+			}
+			if entry.value.kind != payload.KindString {
+				return c.shape(entry.value, "string or null", entry.key)
+			}
+			if err = c.markOpaque(entry.value); err != nil {
+				return err
+			}
+			continue
+		}
+		// Codex permits additive client metadata. Inspect unknown string-bearing
+		// values recursively instead of either rejecting schema evolution or
+		// forwarding an opaque secret-bearing subtree.
+		if err = walkResponsesUntrustedMetadata(c, entry.value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isResponsesClientMetadataControl(key string) bool {
+	switch key {
+	case "x-codex-installation-id", "session_id", "thread_id", "x-codex-window-id",
+		"turn_id", "x-openai-subagent", "x-codex-parent-thread-id", "parent_turn_id",
+		"root_turn_id", "x-codex-turn-state", "x-codex-responses-lite",
+		"x-codex-ws-stream-request-start-ms", "traceparent", "tracestate":
+		return true
+	default:
+		return false
+	}
+}
+
+func walkResponsesUntrustedMetadata(c *collector, value *node) error {
+	if value == nil {
+		return nil
+	}
+	switch value.kind {
+	case payload.KindString:
+		return c.add(value, ScopeToolInput, TargetKindJSONValue, MutabilityJSONOrPlain)
+	case payload.KindObject:
+		if err := c.uniqueObjectKeys(value); err != nil {
+			return err
+		}
+		for _, entry := range value.object {
+			if err := walkResponsesUntrustedMetadata(c, entry.value); err != nil {
+				return err
+			}
+		}
+	case payload.KindArray:
+		for _, entry := range value.array {
+			if err := walkResponsesUntrustedMetadata(c, entry); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -464,16 +568,23 @@ func walkResponsesRootTools(c *collector, tools *node) error {
 		}
 		switch typeNode.token.Value {
 		case "function":
-			if err = walkResponsesFunctionTool(c, tool); err != nil {
-				return err
-			}
-		case "file_search", "computer", "computer_use_preview", "web_search", "web_search_2025_08_26",
-			"mcp", "code_interpreter", "programmatic_tool_calling", "image_generation", "local_shell",
-			"shell", "custom", "namespace", "tool_search", "web_search_preview",
-			"web_search_preview_2025_03_11", "apply_patch":
+			err = walkResponsesFunctionTool(c, tool)
+		case "custom":
+			err = walkResponsesCustomTool(c, tool)
+		case "namespace":
+			err = walkResponsesNamespaceTool(c, tool)
+		case "tool_search":
+			err = walkResponsesToolSearchDefinition(c, tool)
+		case "web_search", "web_search_2025_08_26", "web_search_preview", "web_search_preview_2025_03_11":
+			err = walkResponsesWebSearchDefinition(c, tool)
+		case "file_search", "computer", "computer_use_preview", "mcp", "code_interpreter",
+			"programmatic_tool_calling", "image_generation", "local_shell", "shell", "apply_patch":
 			c.unsupported(tool, "root tool definition variant is not admitted")
 		default:
 			c.unsupportedValue(tool, "unknown root tool definition type ", typeNode.token.Value)
+		}
+		if err != nil {
+			return err
 		}
 	}
 	return nil
@@ -501,6 +612,123 @@ func walkResponsesFunctionTool(c *collector, tool *node) error {
 	return c.walkStringObjectField(tool, "output_schema", false, true, ScopeSystem)
 }
 
+func walkResponsesCustomTool(c *collector, tool *node) error {
+	if err := c.unique(
+		tool,
+		"type", "name", "description", "defer_loading", "format", "allowed_callers",
+	); err != nil {
+		return err
+	}
+	if err := c.markOpaqueStringField(tool, "name", true, false); err != nil {
+		return err
+	}
+	if err := c.addStringField(tool, "description", false, true, ScopeSystem, TargetKindNaturalText); err != nil {
+		return err
+	}
+	if _, _, err := responsesFieldOfKind(c, tool, "defer_loading", payload.KindBoolean, false, true); err != nil {
+		return err
+	}
+	if err := c.markOpaqueStringArrayField(tool, "allowed_callers", false, true); err != nil {
+		return err
+	}
+	format, present, err := responsesFieldOfKind(c, tool, "format", payload.KindObject, false, true)
+	if err != nil || !present {
+		return err
+	}
+	if err = c.unique(format, "type", "syntax", "definition"); err != nil {
+		return err
+	}
+	if err = c.markOpaqueStringField(format, "type", true, false); err != nil {
+		return err
+	}
+	if err = c.markOpaqueStringField(format, "syntax", false, true); err != nil {
+		return err
+	}
+	return c.addStringField(format, "definition", false, true, ScopeSystem, TargetKindCode)
+}
+
+func walkResponsesNamespaceTool(c *collector, tool *node) error {
+	if err := c.unique(tool, "type", "name", "description", "tools"); err != nil {
+		return err
+	}
+	if err := c.markOpaqueStringField(tool, "name", true, false); err != nil {
+		return err
+	}
+	if err := c.addStringField(tool, "description", false, true, ScopeSystem, TargetKindNaturalText); err != nil {
+		return err
+	}
+	nested, present, err := responsesFieldOfKind(c, tool, "tools", payload.KindArray, true, false)
+	if err != nil || !present {
+		return err
+	}
+	return walkResponsesRootTools(c, nested)
+}
+
+func walkResponsesToolSearchDefinition(c *collector, tool *node) error {
+	if err := c.unique(tool, "type", "execution", "description", "parameters"); err != nil {
+		return err
+	}
+	if err := c.markOpaqueStringField(tool, "execution", true, false); err != nil {
+		return err
+	}
+	if err := c.addStringField(tool, "description", true, false, ScopeSystem, TargetKindNaturalText); err != nil {
+		return err
+	}
+	return c.walkStringObjectField(tool, "parameters", true, false, ScopeSystem)
+}
+
+func walkResponsesWebSearchDefinition(c *collector, tool *node) error {
+	if err := c.unique(
+		tool,
+		"type", "external_web_access", "indexed_web_access", "filters", "user_location",
+		"search_context_size", "search_content_types", "return_token_budget",
+	); err != nil {
+		return err
+	}
+	for _, key := range []string{"external_web_access", "indexed_web_access"} {
+		if _, _, err := responsesFieldOfKind(c, tool, key, payload.KindBoolean, false, true); err != nil {
+			return err
+		}
+	}
+	filters, hasFilters, err := responsesFieldOfKind(c, tool, "filters", payload.KindObject, false, true)
+	if err != nil {
+		return err
+	}
+	if hasFilters {
+		if err = c.unique(filters, "allowed_domains", "blocked_domains"); err != nil {
+			return err
+		}
+		for _, key := range []string{"allowed_domains", "blocked_domains"} {
+			if err = c.markOpaqueStringArrayField(filters, key, false, true); err != nil {
+				return err
+			}
+		}
+	}
+	location, hasLocation, err := responsesFieldOfKind(c, tool, "user_location", payload.KindObject, false, true)
+	if err != nil {
+		return err
+	}
+	if hasLocation {
+		if err = c.unique(location, "type", "country", "region", "city", "timezone"); err != nil {
+			return err
+		}
+		if err = c.markOpaqueStringField(location, "type", true, false); err != nil {
+			return err
+		}
+		if err = markResponsesOpaqueStringFields(c, location, "country", "region", "city", "timezone"); err != nil {
+			return err
+		}
+	}
+	if err = c.markOpaqueStringField(tool, "search_context_size", false, true); err != nil {
+		return err
+	}
+	if err = c.markOpaqueStringArrayField(tool, "search_content_types", false, true); err != nil {
+		return err
+	}
+	_, _, err = responsesFieldOfKind(c, tool, "return_token_budget", payload.KindNumber, false, true)
+	return err
+}
+
 func walkResponsesInput(c *collector, input *node) error {
 	switch input.kind {
 	case payload.KindString:
@@ -517,10 +745,70 @@ func walkResponsesInput(c *collector, input *node) error {
 	}
 }
 
+func walkResponsesAdditionalTools(c *collector, item *node) error {
+	if err := c.unique(item, "type", "id", "role", "tools"); err != nil {
+		return err
+	}
+	if err := c.markOpaqueStringField(item, "id", false, true); err != nil {
+		return err
+	}
+	if err := c.markOpaqueStringField(item, "role", true, false); err != nil {
+		return err
+	}
+	tools, present, err := responsesFieldOfKind(c, item, "tools", payload.KindArray, true, false)
+	if err != nil || !present {
+		return err
+	}
+	return walkResponsesRootTools(c, tools)
+}
+
+func walkResponsesInternalItemMetadata(c *collector, item *node) error {
+	metadata, present, err := responsesFieldOfKind(
+		c,
+		item,
+		"internal_chat_message_metadata_passthrough",
+		payload.KindObject,
+		false,
+		true,
+	)
+	if err != nil || !present {
+		return err
+	}
+	if err = c.unique(
+		metadata,
+		"turn_id", "create_time", "content_item_kinds", "cell_id", "executed_tool_calls", "tool_calls_complete",
+	); err != nil {
+		return err
+	}
+	if err = markResponsesOpaqueStringFields(c, metadata, "turn_id", "cell_id"); err != nil {
+		return err
+	}
+	if err = c.markOpaqueStringArrayField(metadata, "content_item_kinds", false, true); err != nil {
+		return err
+	}
+	if _, _, err = responsesFieldOfKind(c, metadata, "create_time", payload.KindNumber, false, true); err != nil {
+		return err
+	}
+	if _, _, err = responsesFieldOfKind(c, metadata, "tool_calls_complete", payload.KindBoolean, false, true); err != nil {
+		return err
+	}
+	executed, hasExecuted, err := c.field(metadata, "executed_tool_calls")
+	if err != nil || !hasExecuted || executed.kind == payload.KindNull {
+		return err
+	}
+	// Current Codex clients ignore this input-owned warehouse field and clear it
+	// before egress. Inspect any supplied string leaves anyway so a client cannot
+	// use the pre-deserialization interceptor boundary as an opaque bypass.
+	return walkResponsesUntrustedMetadata(c, executed)
+}
+
 func walkResponsesItem(c *collector, item *node) error {
 	if item.kind != payload.KindObject {
 		c.unsupported(item, "input array element is not an object")
 		return nil
+	}
+	if err := walkResponsesInternalItemMetadata(c, item); err != nil {
+		return err
 	}
 	typeNode, hasType, err := c.stringField(item, "type", false)
 	if err != nil {
@@ -560,8 +848,7 @@ func walkResponsesItem(c *collector, item *node) error {
 		c.unsupported(item, "tool-search output definitions are not admitted")
 		return nil
 	case "additional_tools":
-		c.unsupported(item, "additional tool definitions are not admitted")
-		return nil
+		return walkResponsesAdditionalTools(c, item)
 	case "reasoning":
 		return walkResponsesReasoningReplay(c, item)
 	case "compaction":
@@ -1819,10 +2106,10 @@ func walkResponsesMCPCall(c *collector, item *node) error {
 }
 
 func walkResponsesCustomCall(c *collector, item *node) error {
-	if err := c.unique(item, "type", "input", "call_id", "id", "name", "namespace", "caller"); err != nil {
+	if err := c.unique(item, "type", "input", "call_id", "id", "name", "namespace", "caller", "status"); err != nil {
 		return err
 	}
-	if err := markResponsesOpaqueStringFields(c, item, "call_id", "id", "name", "namespace"); err != nil {
+	if err := markResponsesOpaqueStringFields(c, item, "call_id", "id", "name", "namespace", "status"); err != nil {
 		return err
 	}
 	if err := walkResponsesCallerField(c, item); err != nil {

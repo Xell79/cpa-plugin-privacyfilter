@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -146,6 +147,38 @@ func TestValidRedactedToolRequest(t *testing.T) {
 	for index, body := range cases {
 		if validRedactedToolRequest(body) {
 			t.Fatalf("invalid tool request accepted index=%d body_len=%d", index, len(body))
+		}
+	}
+}
+
+func TestValidRedactedResponsesLiteRequest(t *testing.T) {
+	valid := []byte(`{
+	  "model":"mock-model",
+	  "client_metadata":{
+	    "session_id":"session_1",
+	    "x-codex-turn-metadata":"{\"api_key\":\"[密钥]\"}"
+	  },
+	  "input":[
+	    {"type":"additional_tools","tools":[{"type":"namespace"}]},
+	    {"type":"custom_tool_call","status":"completed","input":"{\"AK\":\"[密钥]\"}"}
+	  ]
+	}`)
+	if !validRedactedResponsesLiteRequest(valid) {
+		t.Fatal("exact redacted Responses Lite request was rejected")
+	}
+
+	cases := [][]byte{
+		nil,
+		[]byte(`{}`),
+		bytes.Replace(valid, []byte(`"model":"mock-model"`), []byte(`"model":"other"`), 1),
+		bytes.Replace(valid, []byte(`"session_id":"session_1"`), []byte(`"session_id":"other"`), 1),
+		bytes.Replace(valid, []byte(`"status":"completed"`), []byte(`"status":"failed"`), 1),
+		bytes.Replace(valid, []byte(`{\"AK\":\"[密钥]\"}`), []byte(`{\"AK\":\"q7z\"}`), 1),
+		bytes.Replace(valid, []byte(`{\"api_key\":\"[密钥]\"}`), []byte(`{\"api_key\":\"q7z\"}`), 1),
+	}
+	for index, body := range cases {
+		if validRedactedResponsesLiteRequest(body) {
+			t.Fatalf("invalid Responses Lite request accepted index=%d body_len=%d", index, len(body))
 		}
 	}
 }

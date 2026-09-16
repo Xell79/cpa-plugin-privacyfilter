@@ -16,11 +16,12 @@ default.
 >
 > Do not install `v0.3.0`: its artifact set passed the release gates, but it was
 > published before repository release immutability was enabled. `v0.3.1` remained
-> an unpublished draft after its publication workflow failed closed. `v0.3.2` is
-> the next candidate under the immutability policy. Install it only after GitHub
-> marks the Release immutable, and only from that Release's checksum-verified
-> artifacts. Never install a source-tree or development build; verify the exact
-> version and filenames before following the examples below.
+> an unpublished draft after its publication workflow failed closed. `v0.3.2` was
+> the first immutable Release. `v0.3.3` adds current Responses Lite/Codex request
+> compatibility; install it only after GitHub marks that Release immutable, and
+> only from its checksum-verified artifacts. Never install a source-tree or
+> development build; verify the exact version and filenames before following the
+> examples below.
 
 ## Security model
 
@@ -59,16 +60,21 @@ not retain original values for restoration.
 | `SourceFormat` | Request schema | Inspected data |
 |---|---|---|
 | `openai` | Chat Completions | message text, multipart text, legacy/current function arguments, tool-role output, function descriptions and parameter schemas |
-| `openai-response` | Responses | instructions, input/replay text, prompt variables, function/custom/MCP/shell/search/code/tool history covered by the pinned input-item union, function descriptions and input/output schemas, text-format schemas |
+| `openai-response` | Responses | instructions, input/replay text, prompt variables, Responses Lite `additional_tools`, function/custom/namespace/tool-search/web-search definitions, current tool history, function descriptions and input/output schemas, text-format schemas, and encoded Codex turn metadata |
 | `claude` | Anthropic Messages | top-level system, message text, `tool_use.input`, string/structured `tool_result.content`, tool descriptions and input schemas |
 | `gemini` | Gemini GenerateContent | system/content text, function arguments/results, executable code/results, display names, function descriptions and parameter/response schemas |
 | `interactions` | Interactions | system instruction, nested input/steps/content, function input/output, tool descriptions and schemas |
 | `gemini-cli` | Interactions compatibility alias | same handling as `interactions` |
 
 Known control and integrity fields remain opaque: model/role/type discriminators,
-tool names and IDs, call IDs, signatures, encrypted reasoning, binary/base64
-payloads, and explicitly enumerated URL/file references. Unsupported Responses
-root-tool variants are rejected rather than forwarded opaquely.
+tool names and IDs, call IDs, status values, signatures, encrypted reasoning,
+binary/base64 payloads, explicitly enumerated URL/file references, and flat
+Codex `client_metadata` transport/session values. The encoded
+`x-codex-turn-metadata` object and additive unknown metadata are recursively
+inspected rather than causing a compatibility 422; known flat transport IDs
+remain opaque.
+Unsupported Responses root-tool variants are rejected rather than forwarded
+opaquely.
 
 ### Structured credential fields
 
@@ -178,7 +184,7 @@ one canonical root library:
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.2_linux_amd64.zip
+unzip privacyfilter_0.3.3_linux_amd64.zip
 ```
 
 The archive contains exactly `privacyfilter.so` (`.dylib` on macOS, `.dll` on
@@ -194,7 +200,7 @@ loaded with `DF_1_NODELETE` on Linux.
 The Host's global plugin subsystem must be enabled, and the library must be
 effectively enabled. Whether a discovered library without a config stanza is
 enabled is Host-version-specific; verify the projected management state rather
-than assuming discovery implies execution. The exact official v7.3.3 image used
+than assuming discovery implies execution. The exact official v7.3.4 image used
 by this release gate discovers but disables an unconfigured library, so it
 requires explicit enablement. A minimal Host stanza is:
 

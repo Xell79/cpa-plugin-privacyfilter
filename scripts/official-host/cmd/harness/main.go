@@ -34,6 +34,8 @@ type mockState struct {
 	AfterProbeRequests    int    `json:"after_probe_requests"`
 	PlaceholderRequests   int    `json:"placeholder_requests"`
 	ToolCallRequests      int    `json:"tool_call_requests"`
+	ResponsesRequests     int    `json:"responses_requests"`
+	ResponsesRedacted     int    `json:"responses_redacted"`
 	InvalidRequests       int    `json:"invalid_requests"`
 	LastBodyBytes         int    `json:"last_body_bytes"`
 	LastBodySHA256        string `json:"last_body_sha256"`
@@ -94,22 +96,24 @@ type noStanzaAssertions struct {
 }
 
 type explicitAssertions struct {
-	AllConfigured       bool `json:"all_configured"`
-	AllRegistered       bool `json:"all_registered"`
-	AllEnabled          bool `json:"all_enabled"`
-	AllEffective        bool `json:"all_effective"`
-	MetadataExact       bool `json:"metadata_exact"`
-	ConfigFieldsExact   bool `json:"config_fields_exact"`
-	PrioritiesExact     bool `json:"priorities_exact"`
-	SuccessfulForward   bool `json:"successful_forward"`
-	BeforeAuthOrdered   bool `json:"before_auth_ordered"`
-	AfterAuthOrdered    bool `json:"after_auth_ordered"`
-	PrivacyFilterLast   bool `json:"privacyfilter_last"`
-	ValueRedacted       bool `json:"value_redacted"`
-	MarkerNotForwarded  bool `json:"marker_not_forwarded"`
-	SuccessStateValid   bool `json:"success_state_valid"`
-	ActiveTermination   bool `json:"active_termination"`
-	BlockedNotForwarded bool `json:"blocked_not_forwarded"`
+	AllConfigured         bool `json:"all_configured"`
+	AllRegistered         bool `json:"all_registered"`
+	AllEnabled            bool `json:"all_enabled"`
+	AllEffective          bool `json:"all_effective"`
+	MetadataExact         bool `json:"metadata_exact"`
+	ConfigFieldsExact     bool `json:"config_fields_exact"`
+	PrioritiesExact       bool `json:"priorities_exact"`
+	SuccessfulForward     bool `json:"successful_forward"`
+	BeforeAuthOrdered     bool `json:"before_auth_ordered"`
+	AfterAuthOrdered      bool `json:"after_auth_ordered"`
+	PrivacyFilterLast     bool `json:"privacyfilter_last"`
+	ValueRedacted         bool `json:"value_redacted"`
+	MarkerNotForwarded    bool `json:"marker_not_forwarded"`
+	SuccessStateValid     bool `json:"success_state_valid"`
+	ResponsesLiteForward  bool `json:"responses_lite_forward"`
+	ResponsesLiteRedacted bool `json:"responses_lite_redacted"`
+	ActiveTermination     bool `json:"active_termination"`
+	BlockedNotForwarded   bool `json:"blocked_not_forwarded"`
 }
 
 type phaseReport struct {
@@ -246,6 +250,37 @@ func serveMock(address string) error {
 		response.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(response, `{"id":"chatcmpl-harness","object":"chat.completion","created":0,"model":"mock-model","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
 	})
+	mux.HandleFunc("POST /v1/responses", func(response http.ResponseWriter, request *http.Request) {
+		body, err := readBounded(request.Body)
+		markerPresent := bytes.Contains(body, []byte(syntheticValue))
+		placeholderPresent := bytes.Contains(body, []byte("[密钥]"))
+		redacted := validRedactedResponsesLiteRequest(body)
+		digest := sha256.Sum256(body)
+
+		state.mu.Lock()
+		state.value.Requests++
+		state.value.ResponsesRequests++
+		state.value.LastBodyBytes = len(body)
+		state.value.LastBodySHA256 = hex.EncodeToString(digest[:])
+		if redacted {
+			state.value.RedactedRequests++
+			state.value.ResponsesRedacted++
+		}
+		if markerPresent {
+			state.value.MarkerRequests++
+		}
+		if placeholderPresent {
+			state.value.PlaceholderRequests++
+		}
+		if err != nil || !redacted || markerPresent {
+			state.value.InvalidRequests++
+		}
+		state.mu.Unlock()
+
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(response, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-harness\",\"object\":\"response\",\"created_at\":0,\"status\":\"completed\",\"model\":\"mock-model\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n")
+	})
 	server := &http.Server{
 		Addr:              address,
 		Handler:           mux,
@@ -285,6 +320,49 @@ func validRedactedToolRequest(body []byte) bool {
 	}
 	value, ok := arguments["api_key"].(string)
 	return ok && value == "[密钥]"
+}
+
+func validRedactedResponsesLiteRequest(body []byte) bool {
+	var payload struct {
+		Model          string                     `json:"model"`
+		ClientMetadata map[string]json.RawMessage `json:"client_metadata"`
+		Input          []struct {
+			Type   string            `json:"type"`
+			Status string            `json:"status"`
+			Input  string            `json:"input"`
+			Tools  []json.RawMessage `json:"tools"`
+		} `json:"input"`
+	}
+	if json.Unmarshal(body, &payload) != nil || payload.Model != "mock-model" || len(payload.Input) != 2 {
+		return false
+	}
+	if payload.Input[0].Type != "additional_tools" || len(payload.Input[0].Tools) != 1 {
+		return false
+	}
+	if payload.Input[1].Type != "custom_tool_call" || payload.Input[1].Status != "completed" {
+		return false
+	}
+	var customInput map[string]any
+	if json.Unmarshal([]byte(payload.Input[1].Input), &customInput) != nil || len(customInput) != 1 || customInput["AK"] != "[密钥]" {
+		return false
+	}
+	turnRaw, ok := payload.ClientMetadata["x-codex-turn-metadata"]
+	if !ok {
+		return false
+	}
+	var encodedTurn string
+	if json.Unmarshal(turnRaw, &encodedTurn) != nil {
+		return false
+	}
+	var turn map[string]any
+	if json.Unmarshal([]byte(encodedTurn), &turn) != nil || len(turn) != 1 || turn["api_key"] != "[密钥]" {
+		return false
+	}
+	var sessionID string
+	if json.Unmarshal(payload.ClientMetadata["session_id"], &sessionID) != nil || sessionID != "session_1" {
+		return false
+	}
+	return true
 }
 
 func configFieldsExact(fields []pluginConfigField) bool {
@@ -578,6 +656,23 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 		stateAfterSuccess.PlaceholderRequests == 1 &&
 		stateAfterSuccess.ToolCallRequests == 1
 
+	responsesStatus, err := postResponsesLite(client, opts)
+	if err != nil {
+		return assertions, err
+	}
+	assertions.ResponsesLiteForward = responsesStatus == http.StatusOK
+	stateAfterResponses, err := fetchMockState(client, opts.mockURL)
+	if err != nil {
+		return assertions, err
+	}
+	assertions.ResponsesLiteRedacted = stateAfterResponses.Requests == 2 &&
+		stateAfterResponses.ResponsesRequests == 1 &&
+		stateAfterResponses.ResponsesRedacted == 1 &&
+		stateAfterResponses.RedactedRequests == 2 &&
+		stateAfterResponses.MarkerRequests == 0 &&
+		stateAfterResponses.PlaceholderRequests == 2 &&
+		stateAfterResponses.InvalidRequests == 0
+
 	blockedStatus, err := postChat(client, opts, true)
 	if err != nil {
 		return assertions, err
@@ -587,7 +682,7 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 	if err != nil {
 		return assertions, err
 	}
-	assertions.BlockedNotForwarded = stateAfterBlock == stateAfterSuccess
+	assertions.BlockedNotForwarded = stateAfterBlock == stateAfterResponses
 
 	if !allTrue(
 		assertions.AllConfigured,
@@ -604,11 +699,13 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 		assertions.ValueRedacted,
 		assertions.MarkerNotForwarded,
 		assertions.SuccessStateValid,
+		assertions.ResponsesLiteForward,
+		assertions.ResponsesLiteRedacted,
 		assertions.ActiveTermination,
 		assertions.BlockedNotForwarded,
 	) {
 		return assertions, fmt.Errorf(
-			"explicit exact-Host assertion failed: configured=%t registered=%t high_registered=%t low_registered=%t privacy_registered=%t enabled=%t effective=%t metadata=%t fields=%t priorities=%t success_status=%d blocked_status=%d success_requests=%d final_requests=%d before_ordered=%d after_ordered=%d redacted=%d markers=%d before_probe=%d after_probe=%d placeholder=%d tool_call=%d invalid=%d body_bytes=%d body_sha256=%s",
+			"explicit exact-Host assertion failed: configured=%t registered=%t high_registered=%t low_registered=%t privacy_registered=%t enabled=%t effective=%t metadata=%t fields=%t priorities=%t success_status=%d responses_status=%d blocked_status=%d success_requests=%d responses_requests=%d final_requests=%d before_ordered=%d after_ordered=%d redacted=%d responses_redacted=%d markers=%d before_probe=%d after_probe=%d placeholder=%d tool_call=%d invalid=%d body_bytes=%d body_sha256=%s",
 			assertions.AllConfigured,
 			assertions.AllRegistered,
 			entries["order-high"].Registered,
@@ -620,12 +717,15 @@ func verifyExplicit(client *http.Client, opts verifierOptions, response pluginLi
 			assertions.ConfigFieldsExact,
 			assertions.PrioritiesExact,
 			successStatus,
+			responsesStatus,
 			blockedStatus,
 			stateAfterSuccess.Requests,
+			stateAfterResponses.ResponsesRequests,
 			stateAfterBlock.Requests,
 			stateAfterBlock.BeforeOrderedRequests,
 			stateAfterBlock.AfterOrderedRequests,
 			stateAfterBlock.RedactedRequests,
+			stateAfterBlock.ResponsesRedacted,
 			stateAfterBlock.MarkerRequests,
 			stateAfterBlock.BeforeProbeRequests,
 			stateAfterBlock.AfterProbeRequests,
@@ -691,6 +791,66 @@ func postChat(client *http.Client, opts verifierOptions, blocked bool) (int, err
 	response, err := client.Do(request)
 	if err != nil {
 		return 0, errors.New("chat request failed")
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxHTTPBody))
+	return response.StatusCode, nil
+}
+
+func postResponsesLite(client *http.Client, opts verifierOptions) (int, error) {
+	body := []byte(`{
+	  "model":"mock-responses-model",
+	  "client_metadata":{
+	    "session_id":"session_1",
+	    "x-codex-installation-id":"installation_1",
+	    "x-codex-window-id":"window_1",
+	    "thread_id":"thread_1",
+	    "turn_id":"turn_1",
+	    "root_turn_id":"root_1",
+	    "x-codex-turn-metadata":"{\"api_key\":\"q7z\"}"
+	  },
+	  "input":[
+	    {
+	      "type":"additional_tools",
+	      "id":"at_1",
+	      "role":"developer",
+	      "tools":[{
+	        "type":"namespace",
+	        "name":"functions",
+	        "description":"interfaces",
+	        "tools":[{
+	          "type":"custom",
+	          "name":"freeform",
+	          "description":"freeform input",
+	          "format":{"type":"grammar","syntax":"lark","definition":"start: WORD"}
+	        }]
+	      }]
+	    },
+	    {
+	      "type":"custom_tool_call",
+	      "id":"ct_1",
+	      "call_id":"call_1",
+	      "name":"freeform",
+	      "status":"completed",
+	      "input":"{\"AK\":\"q7z\"}"
+	    }
+	  ],
+	  "stream":false
+	}`)
+	request, err := http.NewRequest(http.MethodPost, opts.hostURL+"/v1/responses", bytes.NewReader(body))
+	if err != nil {
+		return 0, errors.New("could not construct Responses Lite request")
+	}
+	request.Header.Set("Authorization", "Bearer "+opts.apiKey)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
+	// Keep the synthetic ordering probes from replacing this Responses body with
+	// their Chat Completions fixture. The privacy filter does not special-case the
+	// header, so both interceptor stages still inspect the original request.
+	request.Header.Set("X-Harness-Block", "1")
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, errors.New("Responses Lite request failed")
 	}
 	defer response.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxHTTPBody))

@@ -1,6 +1,8 @@
 package walker_test
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	"github.com/ahoo/cpa-plugin-privacyfilter/walker"
@@ -24,7 +26,7 @@ func TestResponsesInputUnionHasExplicitDisposition(t *testing.T) {
 		{"function call output list", `{"type":"function_call_output","id":"fco_1","call_id":"call_1","output":[{"type":"input_text","text":"visible"}]}`, 1, 0},
 		{"tool search call", `{"type":"tool_search_call","id":"ts_1","call_id":"call_1","execution":"client","status":"completed","arguments":{"query":"visible"}}`, 1, 0},
 		{"tool search output", `{"type":"tool_search_output","id":"tso_1","tools":[]}`, 0, 1},
-		{"additional tools", `{"type":"additional_tools","id":"at_1","role":"developer","tools":[]}`, 0, 1},
+		{"additional tools", `{"type":"additional_tools","id":"at_1","role":"developer","tools":[]}`, 0, 0},
 		{"reasoning", `{"type":"reasoning","id":"rs_1","status":"completed","encrypted_content":"ciphertext","summary":[{"type":"summary_text","text":"replay text"}]}`, 1, 0},
 		{"compaction", `{"type":"compaction","id":"cp_1","encrypted_content":"ciphertext"}`, 0, 0},
 		{"image generation call", `{"type":"image_generation_call","id":"ig_1","status":"completed","result":"base64"}`, 0, 0},
@@ -40,7 +42,7 @@ func TestResponsesInputUnionHasExplicitDisposition(t *testing.T) {
 		{"MCP approval response", `{"type":"mcp_approval_response","id":"mar_1","approval_request_id":"ma_1","approve":false,"reason":"visible reason"}`, 1, 0},
 		{"MCP call", `{"type":"mcp_call","id":"mc_1","server_label":"server","name":"lookup","status":"completed","arguments":"{}","error":"visible error","output":"visible output"}`, 3, 0},
 		{"custom tool call output list", `{"type":"custom_tool_call_output","id":"cto_1","call_id":"call_1","output":[{"type":"input_text","text":"visible"}]}`, 1, 0},
-		{"custom tool call", `{"type":"custom_tool_call","id":"ct_1","call_id":"call_1","name":"freeform","input":"visible input"}`, 1, 0},
+		{"custom tool call", `{"type":"custom_tool_call","id":"ct_1","call_id":"call_1","name":"freeform","status":"completed","input":"visible input"}`, 1, 0},
 		{"compaction trigger", `{"type":"compaction_trigger"}`, 0, 0},
 		{"item reference", `{"type":"item_reference","id":"item_1"}`, 0, 0},
 		{"program", `{"type":"program","id":"pg_1","call_id":"call_1","code":"replay code","fingerprint":"fingerprint"}`, 0, 1},
@@ -86,19 +88,19 @@ func TestResponsesRootToolUnionHasExplicitDisposition(t *testing.T) {
 		{"file search", `{"type":"file_search"}`, 1},
 		{"computer", `{"type":"computer"}`, 1},
 		{"computer use preview", `{"type":"computer_use_preview"}`, 1},
-		{"web search", `{"type":"web_search"}`, 1},
-		{"web search 2025-08-26", `{"type":"web_search_2025_08_26"}`, 1},
+		{"web search", `{"type":"web_search"}`, 0},
+		{"web search 2025-08-26", `{"type":"web_search_2025_08_26"}`, 0},
 		{"MCP", `{"type":"mcp"}`, 1},
 		{"code interpreter", `{"type":"code_interpreter"}`, 1},
 		{"programmatic tool calling", `{"type":"programmatic_tool_calling"}`, 1},
 		{"image generation", `{"type":"image_generation"}`, 1},
 		{"local shell", `{"type":"local_shell"}`, 1},
 		{"shell", `{"type":"shell"}`, 1},
-		{"custom", `{"type":"custom"}`, 1},
-		{"namespace", `{"type":"namespace"}`, 1},
-		{"tool search", `{"type":"tool_search"}`, 1},
-		{"web search preview", `{"type":"web_search_preview"}`, 1},
-		{"web search preview 2025-03-11", `{"type":"web_search_preview_2025_03_11"}`, 1},
+		{"custom", `{"type":"custom","name":"freeform","description":"interface","format":{"type":"grammar","syntax":"lark","definition":"start: WORD"}}`, 0},
+		{"namespace", `{"type":"namespace","name":"functions","description":"interfaces","tools":[{"type":"function","name":"lookup","parameters":{}}]}`, 0},
+		{"tool search", `{"type":"tool_search","execution":"client","description":"find a tool","parameters":{}}`, 0},
+		{"web search preview", `{"type":"web_search_preview"}`, 0},
+		{"web search preview 2025-03-11", `{"type":"web_search_preview_2025_03_11"}`, 0},
 		{"apply patch", `{"type":"apply_patch"}`, 1},
 	}
 
@@ -117,6 +119,123 @@ func TestResponsesRootToolUnionHasExplicitDisposition(t *testing.T) {
 	result := mustWalk(t, "openai-response", `{"input":"ok","tools":[{"type":"future_tool"}]}`)
 	if result.UnsupportedCount != 1 {
 		t.Fatalf("unknown tool unsupported count = %d, want 1", result.UnsupportedCount)
+	}
+}
+
+func TestResponsesLiteAdditionalToolsAndClientMetadata(t *testing.T) {
+	const body = `{
+	  "client_metadata": {
+	    "x-codex-installation-id": "install_1",
+	    "session_id": "session_1",
+	    "thread_id": "thread_1",
+	    "x-codex-window-id": "window_1",
+	    "turn_id": "turn_1",
+	    "root_turn_id": "root_1",
+	    "x-codex-turn-metadata": "{\"api_key\":\"short-value\"}",
+	    "future_transport_key": {"nested": "opaque transport value"}
+	  },
+	  "input": [
+	    {
+	      "type": "additional_tools",
+	      "id": "at_1",
+	      "role": "developer",
+	      "tools": [
+	        {
+	          "type": "namespace",
+	          "name": "functions",
+	          "description": "namespace description",
+	          "tools": [
+	            {
+	              "type": "function",
+	              "name": "lookup",
+	              "description": "function description",
+	              "parameters": {"type": "object", "properties": {"query": {"description": "query description"}}}
+	            },
+	            {
+	              "type": "custom",
+	              "name": "freeform",
+	              "description": "custom description",
+	              "format": {"type": "grammar", "syntax": "lark", "definition": "start: WORD"}
+	            }
+	          ]
+	        },
+	        {"type": "tool_search", "execution": "client", "description": "search description", "parameters": {"type": "object"}},
+	        {
+	          "type": "web_search",
+	          "external_web_access": true,
+	          "filters": {"allowed_domains": ["example.invalid"], "blocked_domains": ["blocked.invalid"]},
+	          "user_location": {"type": "approximate", "country": "US"},
+	          "search_context_size": "medium",
+	          "search_content_types": ["text"],
+	          "return_token_budget": 2048
+	        }
+	      ]
+	    },
+	    {
+	      "type": "custom_tool_call",
+	      "id": "ct_1",
+	      "call_id": "call_1",
+	      "name": "freeform",
+	      "status": "completed",
+	      "internal_chat_message_metadata_passthrough": {
+	        "turn_id": "turn_1",
+	        "create_time": 1.5,
+	        "content_item_kinds": ["custom_tool_call"],
+	        "executed_tool_calls": [{"arguments": {"api_key": "short-value"}}],
+	        "tool_calls_complete": true
+	      },
+	      "input": "{\"AK\":\"short-value\"}"
+	    }
+	  ]
+	}`
+
+	result := mustWalk(t, "openai-response", body)
+	if result.UnsupportedCount != 0 {
+		t.Fatalf("unsupported count = %d, want 0", result.UnsupportedCount)
+	}
+
+	targetPaths := make(map[string]struct{}, len(result.Targets))
+	for _, target := range result.Targets {
+		targetPaths[target.Path.String()] = struct{}{}
+	}
+	for _, path := range []string{
+		`$["client_metadata"]["x-codex-turn-metadata"]`,
+		`$["client_metadata"]["future_transport_key"]["nested"]`,
+		`$["input"][0]["tools"][0]["description"]`,
+		`$["input"][0]["tools"][0]["tools"][0]["description"]`,
+		`$["input"][0]["tools"][0]["tools"][1]["format"]["definition"]`,
+		`$["input"][0]["tools"][1]["description"]`,
+		`$["input"][1]["internal_chat_message_metadata_passthrough"]["executed_tool_calls"][0]["arguments"]["api_key"]`,
+		`$["input"][1]["input"]`,
+	} {
+		if _, ok := targetPaths[path]; !ok {
+			t.Fatalf("expected target path %s", path)
+		}
+	}
+	for _, path := range []string{
+		`$["client_metadata"]["session_id"]`,
+		`$["input"][1]["status"]`,
+	} {
+		if _, ok := targetPaths[path]; ok {
+			t.Fatalf("control metadata unexpectedly targeted at %s", path)
+		}
+	}
+}
+
+func TestResponsesMetadataRejectsDuplicateKeys(t *testing.T) {
+	bodies := []string{
+		`{"input":"ok","client_metadata":{"session_id":"one","session_id":"two"}}`,
+		`{"input":[{"type":"custom_tool_call","name":"tool","input":"ok","internal_chat_message_metadata_passthrough":{"executed_tool_calls":[{"arguments":{"api_key":"one","api_key":"two"}}]}}]}`,
+	}
+	for index, body := range bodies {
+		_, err := walker.Walk(
+			context.Background(),
+			"openai-response",
+			[]byte(body),
+		)
+		if !errors.Is(err, walker.ErrAmbiguousPath) {
+			t.Fatalf("duplicate metadata key was not rejected as ambiguous index=%d", index)
+		}
 	}
 }
 
