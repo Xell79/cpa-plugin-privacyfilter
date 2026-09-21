@@ -88,12 +88,13 @@ func (p *privacyFilterPlugin) interceptRequest(ctx context.Context, req pluginap
 	} else {
 		state.Record(req.Body, nil)
 	}
-	if result.findings > 0 || result.unsupported > 0 {
+	if result.findings > 0 || result.mlFlagged > 0 || result.unsupported > 0 {
 		log.WithFields(log.Fields{
 			"source_format": safeLogValue(req.SourceFormat),
 			"model":         safeLogValue(req.RequestedModel),
 			"mode":          string(p.cfg.Mode),
 			"findings":      result.findings,
+			"ml_flagged":    result.mlFlagged,
 			"targets":       result.targets,
 			"opaque":        result.opaque,
 			"unsupported":   result.unsupported,

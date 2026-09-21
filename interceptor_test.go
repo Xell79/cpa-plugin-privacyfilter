@@ -940,11 +940,11 @@ regex = '''(?:TRIGGER|\[CUSTOM\])'''
 	if err != nil {
 		t.Fatalf("budget: %v", err)
 	}
-	produced, findings, changed, err := plugin.sanitizeText(context.Background(), "TRIGGER", budget, renderer, privacyengine.FieldContext{})
+	produced, findings, changed, err := plugin.sanitizeText(context.Background(), "TRIGGER", budget, renderer, privacyengine.FieldContext{}, nil)
 	if err != nil || !changed || findings != 1 || produced != "[CUSTOM]" {
 		t.Fatalf("first pass = changed %v, findings %d, err %v", changed, findings, err)
 	}
-	_, findings, changed, err = plugin.sanitizeText(context.Background(), produced, budget, renderer, privacyengine.FieldContext{})
+	_, findings, changed, err = plugin.sanitizeText(context.Background(), produced, budget, renderer, privacyengine.FieldContext{}, nil)
 	if err != nil || changed || findings != 0 {
 		t.Fatalf("request-produced placeholder was rescanned: changed %v, findings %d, err %v", changed, findings, err)
 	}
@@ -954,7 +954,7 @@ regex = '''(?:TRIGGER|\[CUSTOM\])'''
 	if err != nil {
 		t.Fatalf("fresh budget: %v", err)
 	}
-	_, findings, _, err = plugin.sanitizeText(context.Background(), "[CUSTOM]", freshBudget, freshRenderer, privacyengine.FieldContext{})
+	_, findings, _, err = plugin.sanitizeText(context.Background(), "[CUSTOM]", freshBudget, freshRenderer, privacyengine.FieldContext{}, nil)
 	if err != nil || findings != 1 {
 		t.Fatalf("user-supplied placeholder-shaped text bypassed detection: findings %d, err %v", findings, err)
 	}

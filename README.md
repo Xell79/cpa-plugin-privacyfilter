@@ -251,6 +251,11 @@ replacements:
 skip_models: []                 # explicit break-glass bypasses
 skip_formats: []
 
+ml_assist:                     # distilled second opinion (default off)
+  enabled: false
+  threshold: 0.5               # validated separation point; within [0,1]
+  mode: audit                  # audit counts only; enforce redacts too
+
 limits:
   max_body_bytes: 33554432
   max_depth: 128
@@ -278,6 +283,7 @@ limits above a hard maximum make registration fail.
 | `block_rule_ids` | `[]` | In redact mode, terminate with 422 instead of replacing findings from these exact rule IDs. |
 | `replacements` | typed defaults | Override the six placeholder kinds; empty removes the matched value. |
 | `skip_models` / `skip_formats` | `[]` | Trusted, explicit inspection bypasses. |
+| `ml_assist` | disabled | Distilled sensitive-text student rescoring engine-clean texts. `audit` counts `ml_flagged` in logs only; `enforce` also redacts the whole span (downgraded to audit when plugin `mode` is `audit`). Never overrides engine findings. |
 | `limits` | values above | Request-wide bounds. Payload zeros select bounded defaults; detector limits must be positive. No value may exceed its hard maximum. |
 
 The embedded snapshot is the exact Gitleaks v8.30.0 default configuration at

@@ -77,6 +77,40 @@ type privacyFilterConfig struct {
 	BlockRuleIDs          []string          `yaml:"block_rule_ids"`
 	Replacements          map[string]string `yaml:"replacements"`
 	Limits                limitsConfig      `yaml:"limits"`
+	// MLAssist is the distilled sensitive-text student (second opinion).
+	// It only rescores texts the deterministic engine left clean; it never
+	// overrides engine findings. Disabled by default.
+	MLAssist mlAssistConfig `yaml:"ml_assist"`
+}
+
+// mlAssistMode selects what happens when the ML second opinion fires.
+type mlAssistMode string
+
+const (
+	mlAssistAudit   mlAssistMode = "audit"
+	mlAssistEnforce mlAssistMode = "enforce"
+)
+
+// mlAssistConfig mirrors the ml_assist mapping.
+type mlAssistConfig struct {
+	Enabled   bool         `yaml:"enabled"`
+	Threshold float64      `yaml:"threshold"`
+	Mode      mlAssistMode `yaml:"mode"`
+}
+
+// effectiveThreshold returns the configured threshold, defaulting to the
+// validated 0.5 separation point when unset.
+func (m mlAssistConfig) effectiveThreshold() float64 {
+	if m.Threshold <= 0 {
+		return 0.5
+	}
+	return m.Threshold
+}
+
+// enforce reports whether a firing second opinion redacts. Audit (the
+// default) only counts.
+func (m mlAssistConfig) enforce() bool {
+	return m.Enabled && m.Mode == mlAssistEnforce
 }
 
 func defaultConfig() privacyFilterConfig {
@@ -156,6 +190,14 @@ func (cfg privacyFilterConfig) validate() error {
 		if _, ok := replacementKind(kind); !ok {
 			return fmt.Errorf("invalid privacyfilter config: unknown replacement kind %q", kind)
 		}
+	}
+	switch cfg.MLAssist.Mode {
+	case "", mlAssistAudit, mlAssistEnforce:
+	default:
+		return fmt.Errorf("invalid privacyfilter config: ml_assist.mode must be %q or %q", mlAssistAudit, mlAssistEnforce)
+	}
+	if cfg.MLAssist.Threshold < 0 || cfg.MLAssist.Threshold > 1 {
+		return fmt.Errorf("invalid privacyfilter config: ml_assist.threshold must be within [0,1]")
 	}
 	seenRules := make(map[string]struct{}, len(cfg.BlockRuleIDs))
 	for _, ruleID := range cfg.BlockRuleIDs {
