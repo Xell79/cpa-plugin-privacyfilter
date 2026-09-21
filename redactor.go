@@ -50,6 +50,7 @@ type sanitizeResult struct {
 	skipped     int
 	opaque      int
 	unsupported int
+	mlFlagged   int
 }
 
 type requestInspectionBudget struct {
@@ -57,6 +58,9 @@ type requestInspectionBudget struct {
 	limits          payload.Limits
 	jsonNodes       int
 	structuralBytes int
+	// mlFlagged counts ML second-opinion hits. Shared by pointer so nested
+	// scans accumulate into the request root; nil disables counting.
+	mlFlagged *int
 }
 
 const maxEncodedJSONNesting = 4
@@ -221,6 +225,8 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 	if err != nil {
 		return result, err
 	}
+	mlHits := 0
+	inspectionBudget.mlFlagged = &mlHits
 	if renderer == nil {
 		renderer = newRequestRenderer(p.renderer)
 	}
@@ -239,6 +245,7 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 		}
 	}
 	if p.cfg.Mode == modeAudit || len(replacements) == 0 {
+		result.mlFlagged = mlHits
 		return result, nil
 	}
 	out, changed, err := walked.Document.Replace(ctx, replacements)
@@ -249,6 +256,7 @@ func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(
 		result.body = out
 		result.changed = true
 	}
+	result.mlFlagged = mlHits
 	return result, nil
 }
 
@@ -269,6 +277,7 @@ func (p *privacyFilterPlugin) sanitizeTarget(
 			budget.engine,
 			renderer,
 			engineFieldContext(target.Context),
+			budget.mlFlagged,
 		)
 	case walker.MutabilityEncodedJSON:
 		return p.sanitizeJSONTextWithBudget(ctx, target.Token.Value, budget, renderer, target.Context, false, 0)
@@ -324,7 +333,7 @@ func (p *privacyFilterPlugin) sanitizeJSONTextWithBudget(
 	}
 	fieldContext := engineFieldContext(outerContext)
 	if privacyengine.CredentialFieldApplies(fieldContext) {
-		return p.sanitizeText(ctx, text, budget.engine, renderer, fieldContext)
+		return p.sanitizeText(ctx, text, budget.engine, renderer, fieldContext, budget.mlFlagged)
 	}
 	sanitizePlain := func() (string, int, bool, error) {
 		plainContext := fieldContext
@@ -332,7 +341,7 @@ func (p *privacyFilterPlugin) sanitizeJSONTextWithBudget(
 			plainContext.Structured = false
 			plainContext.Encoded = false
 		}
-		return p.sanitizeText(ctx, text, budget.engine, renderer, plainContext)
+		return p.sanitizeText(ctx, text, budget.engine, renderer, plainContext, budget.mlFlagged)
 	}
 	if allowPlain && !looksLikeEncodedJSONContainer(text) {
 		return sanitizePlain()
@@ -385,6 +394,7 @@ func (p *privacyFilterPlugin) sanitizeJSONTextWithBudget(
 				budget.engine,
 				renderer,
 				engineFieldContext(innerContext),
+				budget.mlFlagged,
 			)
 		}
 		if err != nil {
@@ -477,6 +487,7 @@ func (p *privacyFilterPlugin) sanitizeText(
 	budget *privacyengine.Budget,
 	renderer privacyengine.Renderer,
 	fieldContext privacyengine.FieldContext,
+	mlFlagged *int,
 ) (string, int, bool, error) {
 	preservePlaceholder := false
 	if requestRenderer, ok := renderer.(*requestRenderer); ok {
@@ -499,5 +510,49 @@ func (p *privacyFilterPlugin) sanitizeText(
 			}
 		}
 	}
+	if len(result.Findings) == 0 && !preservePlaceholder && p.cfg.MLAssist.Enabled {
+		if flagged, replacement, err := p.mlSecondOpinion(ctx, text, renderer); err == nil && flagged {
+			if mlFlagged != nil {
+				*mlFlagged++
+			}
+			if replacement != "" {
+				return replacement, 1, true, nil
+			}
+		}
+	}
 	return result.Redacted, len(result.Findings), result.Hit(), nil
+}
+
+// mlSecondOpinion rescores text the deterministic engine left clean with the
+// distilled student. It returns flagged=true when the score reaches the
+// configured threshold, plus a redacted replacement in enforce mode (empty
+// in audit mode, or when the plugin itself runs in audit mode).
+//
+// The ML verdict never overrides engine findings (this runs only on zero
+// findings), never inspects placeholders, and fails open on scorer errors:
+// the engine already passed the text.
+func (p *privacyFilterPlugin) mlSecondOpinion(ctx context.Context, text string, renderer privacyengine.Renderer) (bool, string, error) {
+	if strings.TrimSpace(text) == "" {
+		return false, "", nil
+	}
+	score, err := mlScore(text)
+	if err != nil {
+		return false, "", err
+	}
+	if score < p.cfg.MLAssist.effectiveThreshold() {
+		return false, "", nil
+	}
+	if !p.cfg.MLAssist.enforce() || p.cfg.Mode == modeAudit {
+		return true, "", nil
+	}
+	replacement, err := renderer.Render(ctx, privacyengine.Finding{
+		Kind:   privacyengine.KindSecret,
+		RuleID: mlRuleID,
+		Start:  0,
+		End:    len(text),
+	}, text)
+	if err != nil {
+		return false, "", err
+	}
+	return true, replacement, nil
 }
