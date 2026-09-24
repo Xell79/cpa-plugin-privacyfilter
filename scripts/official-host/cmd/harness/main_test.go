@@ -124,7 +124,7 @@ func TestVerifyNoStanza(t *testing.T) {
 }
 
 func TestValidRedactedToolRequest(t *testing.T) {
-	valid := []byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}}]}]}`)
+	valid := []byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}}]}]}`)
 	if !validRedactedToolRequest(valid) {
 		t.Fatal("exact redacted tool request was rejected")
 	}
@@ -133,15 +133,15 @@ func TestValidRedactedToolRequest(t *testing.T) {
 		nil,
 		[]byte(`{}`),
 		[]byte(`{"model":"other","messages":[]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"before-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}}]}]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"user","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}}]}]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"other","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}}]}]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"other","arguments":"{\"api_key\":\"[密钥]\"}"}}]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"before-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}}]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"user","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}}]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"other","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}}]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"other","arguments":"{\"api_key\":\"[SECRET]\"}"}}]}]}`),
 		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"not-json"}}]}]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\",\"extra\":true}"}}]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\",\"extra\":true}"}}]}]}`),
 		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[]}]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}},{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}}]}]}`),
-		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[密钥]\"}"}}]},{"role":"assistant","tool_calls":[]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}},{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}}]}]}`),
+		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"[SECRET]\"}"}}]},{"role":"assistant","tool_calls":[]}]}`),
 		[]byte(`{"model":"mock-model","messages":[{"role":"assistant","tool_calls":[{"id":"after-probe","type":"function","function":{"name":"probe","arguments":"{\"api_key\":\"not-redacted\"}"}}]}]}`),
 	}
 	for index, body := range cases {
@@ -156,11 +156,11 @@ func TestValidRedactedResponsesLiteRequest(t *testing.T) {
 	  "model":"mock-model",
 	  "client_metadata":{
 	    "session_id":"session_1",
-	    "x-codex-turn-metadata":"{\"api_key\":\"[密钥]\"}"
+	    "x-codex-turn-metadata":"{\"api_key\":\"[SECRET]\"}"
 	  },
 	  "input":[
 	    {"type":"additional_tools","tools":[{"type":"namespace"}]},
-	    {"type":"custom_tool_call","status":"completed","input":"{\"AK\":\"[密钥]\"}"}
+	    {"type":"custom_tool_call","status":"completed","input":"{\"AK\":\"[SECRET]\"}"}
 	  ]
 	}`)
 	if !validRedactedResponsesLiteRequest(valid) {
@@ -173,8 +173,8 @@ func TestValidRedactedResponsesLiteRequest(t *testing.T) {
 		bytes.Replace(valid, []byte(`"model":"mock-model"`), []byte(`"model":"other"`), 1),
 		bytes.Replace(valid, []byte(`"session_id":"session_1"`), []byte(`"session_id":"other"`), 1),
 		bytes.Replace(valid, []byte(`"status":"completed"`), []byte(`"status":"failed"`), 1),
-		bytes.Replace(valid, []byte(`{\"AK\":\"[密钥]\"}`), []byte(`{\"AK\":\"q7z\"}`), 1),
-		bytes.Replace(valid, []byte(`{\"api_key\":\"[密钥]\"}`), []byte(`{\"api_key\":\"q7z\"}`), 1),
+		bytes.Replace(valid, []byte(`{\"AK\":\"[SECRET]\"}`), []byte(`{\"AK\":\"q7z\"}`), 1),
+		bytes.Replace(valid, []byte(`{\"api_key\":\"[SECRET]\"}`), []byte(`{\"api_key\":\"q7z\"}`), 1),
 	}
 	for index, body := range cases {
 		if validRedactedResponsesLiteRequest(body) {
@@ -187,7 +187,7 @@ func TestValidReasoningReplayRequest(t *testing.T) {
 	valid := []byte(`{
 	  "model":"mock-model",
 	  "messages":[
-	    {"role":"user","content":"[邮箱]"},
+	    {"role":"user","content":"[EMAIL]"},
 	    {
 	      "role":"assistant",
 	      "content":"answer",
@@ -209,7 +209,7 @@ func TestValidReasoningReplayRequest(t *testing.T) {
 		nil,
 		[]byte(`{}`),
 		bytes.Replace(valid, []byte(`"model":"mock-model"`), []byte(`"model":"other"`), 1),
-		bytes.Replace(valid, []byte(`"content":"[邮箱]"`), []byte(`"content":"replay@example.test"`), 1),
+		bytes.Replace(valid, []byte(`"content":"[EMAIL]"`), []byte(`"content":"replay@example.com"`), 1),
 		bytes.Replace(valid, []byte(`"content":"answer"`), []byte(`"content":"other"`), 1),
 		bytes.Replace(valid, []byte(`"reasoning":"integrity-replay-value"`), []byte(`"reasoning":"changed"`), 1),
 		bytes.Replace(valid, []byte(`"reasoning_content":"integrity-replay-value"`), []byte(`"reasoning_content":"changed"`), 1),

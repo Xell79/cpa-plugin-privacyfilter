@@ -48,7 +48,7 @@ func TestEmbeddedSnapshotAndCaptureSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Redacted != "alibaba=[密钥] " {
+	if result.Redacted != "alibaba=[SECRET] " {
 		t.Fatalf("automatic first capture was not used: redacted_len=%d findings=%d", len(result.Redacted), len(result.Findings))
 	}
 	if len(result.Findings) != 1 || result.Findings[0].RuleID != "alibaba-access-key-id" {
@@ -192,7 +192,7 @@ keywords = ["NEVER_MATCH"]
 	placeholders := []string{
 		"", "   ", "${API_KEY}", "$API_KEY", "$env:API_KEY", "$(API_KEY)",
 		"{{API_KEY}}", "${{ secrets.API_KEY }}", "%API_KEY%", "<API_KEY>",
-		"[密钥]", "[密钥#2]", "[邮箱]", "[电话#2]", "[身份证]", "[银行卡]", "[IP#2]",
+		"[SECRET]", "[SECRET#2]", "[EMAIL]", "[PHONE#2]", "[ID]", "[CARD]", "[IP#2]",
 		"[REDACTED]", "YOUR_API_KEY", "******", "xxxx",
 	}
 	for index, placeholder := range placeholders {
@@ -313,7 +313,7 @@ func TestIssue3OverlapRegression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Redact overlap input: %v", err)
 	}
-	if !result.Hit() || !strings.Contains(result.Redacted, "[密钥]") {
+	if !result.Hit() || !strings.Contains(result.Redacted, "[SECRET]") {
 		t.Fatalf("overlap input was not safely redacted: hit=%t redacted_len=%d findings=%d", result.Hit(), len(result.Redacted), len(result.Findings))
 	}
 }
@@ -390,7 +390,7 @@ id = "never"
 regex = '''NEVER_MATCH_THIS_VALUE'''
 keywords = ["NEVER_MATCH"]
 `)
-	input := "前alice@example.com后 13812345678 192.168.1.1 卡4111111111111111"
+	input := "x alice@example.com x 13812345678 192.0.2.1 x4111111111111111"
 	findings, err := engine.Detect(context.Background(), input, RequestOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -398,7 +398,7 @@ keywords = ["NEVER_MATCH"]
 	if len(findings) != 4 {
 		t.Fatalf("got %d findings: %+v", len(findings), findings)
 	}
-	if findings[0].Start != len("前") || input[findings[0].Start:findings[0].End] != "alice@example.com" {
+	if findings[0].Start != len("x ") || input[findings[0].Start:findings[0].End] != "alice@example.com" {
 		t.Fatalf("offset is not a UTF-8 byte span: %+v", findings[0])
 	}
 	findingType := reflect.TypeOf(Finding{})

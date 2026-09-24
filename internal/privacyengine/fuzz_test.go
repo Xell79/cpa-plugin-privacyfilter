@@ -15,7 +15,7 @@ keywords = ["api"]
 	for _, seed := range []string{
 		"",
 		"api keyABCDEFGHIJKLMNOPQRSTUVWXYZ",
-		"前缀 token=abcDEF1234567890/xyzABC4567890== 后缀",
+		"prefix token=abcDEF1234567890/xyzABC4567890== suffix",
 		string([]byte{0xff, 0xfe, 'a', 'p', 'i', ' ', 'k', 'e', 'y'}),
 	} {
 		f.Add(seed)

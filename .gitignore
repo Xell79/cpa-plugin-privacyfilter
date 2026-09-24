@@ -11,3 +11,13 @@ test-output*
 *.tmp
 __pycache__/
 *.py[cod]
+
+# Local agent state, plans, and chat exports. Not part of the plugin.
+.kilo/
+.kilocode/
+.opencode/
+.claude/
+.cursor/
+
+# Local review notes. Do not publish.
+security_best_practices_report.md

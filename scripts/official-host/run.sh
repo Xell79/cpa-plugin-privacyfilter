@@ -10,7 +10,7 @@ readonly HOST_COMMIT='8335eac'
 readonly HOST_BUILD_DATE='2026-09-15T14:07:07Z'
 readonly MANAGEMENT_KEY='privacyfilter-harness-management'
 readonly CLIENT_KEY='privacyfilter-harness-client'
-readonly -a SENSITIVE_MARKERS=('q7z' 'replay@example.test')
+readonly -a SENSITIVE_MARKERS=('q7z' 'replay@example.com')
 
 library=''
 version=''

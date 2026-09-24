@@ -20,6 +20,8 @@ const (
 	contextOverlapLookahead = 64 // bytes into a candidate
 )
 
+// Chinese keywords stay beside the English ones so a secret written as
+// "密码=..." is still detected. They are match text, not UI copy.
 var reContextSecret = regexp.MustCompile(
 	`(?i)(密码|口令|密钥|password|passwd|pwd|secret|token|api[_\s-]?key)\s*(?:是|为|:|：|=)\s*['"]?([^\s'"，。；;]{4,})`)
 
@@ -41,7 +43,7 @@ var urlPrefixes = []string{
 var (
 	reTemplateVar           = regexp.MustCompile(`^(?:\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}|\$\{\{\s*(?i:secrets)\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$\([A-Za-z_][A-Za-z0-9_]*\)|%\{[A-Za-z_][A-Za-z0-9_]*\}|<[A-Za-z_][A-Za-z0-9_]*>)$`)
 	reSimpleVar             = regexp.MustCompile(`(?i)^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$env:[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)$`)
-	reCredentialPlaceholder = regexp.MustCompile(`(?i)^(?:(?:redacted|masked|hidden)(?:#[0-9]+)?|\[(?:redacted|masked|hidden|secret|credential|api[_ -]?key|邮箱|电话|身份证|银行卡|ip|密钥)(?:#[0-9]+)?\])$`)
+	reCredentialPlaceholder = regexp.MustCompile(`(?i)^(?:(?:redacted|masked|hidden)(?:#[0-9]+)?|\[(?:redacted|masked|hidden|secret|credential|api[_ -]?key|e-?mail|phone|id(?:_card)?|card|bank_card|ip(?:_address)?|邮箱|电话|身份证|银行卡|密钥)(?:#[0-9]+)?\])$`)
 	reMaskOnly              = regexp.MustCompile(`^[*xX._-]{3,}$`)
 	reUUID                  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	reHexOnly               = regexp.MustCompile(`^[0-9a-fA-F]+$`)

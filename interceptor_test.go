@@ -64,7 +64,7 @@ func TestRedactRequestBody_EmailInContent(t *testing.T) {
 	if findings != 1 || modified == nil {
 		t.Fatalf("findings=%d modified=%v, want one redaction", findings, modified != nil)
 	}
-	if !strings.Contains(string(modified), "[邮箱]") || strings.Contains(string(modified), "test@example.com") {
+	if !strings.Contains(string(modified), "[EMAIL]") || strings.Contains(string(modified), "test@example.com") {
 		t.Fatalf("email was not safely redacted: findings=%d body_len=%d", findings, len(modified))
 	}
 }
@@ -499,10 +499,10 @@ func TestShortCredentialFieldsAcrossStructuredToolProtocols(t *testing.T) {
 					t.Fatalf("non-credential value %d was not preserved", index)
 				}
 			}
-			if got := bytes.Count(result.body, []byte("[密钥]")); got != 2*testCase.payloadCount {
+			if got := bytes.Count(result.body, []byte("[SECRET]")); got != 2*testCase.payloadCount {
 				t.Fatalf("base placeholder count = %d, want %d", got, 2*testCase.payloadCount)
 			}
-			if got := bytes.Count(result.body, []byte("[密钥#2]")); got != testCase.payloadCount {
+			if got := bytes.Count(result.body, []byte("[SECRET#2]")); got != testCase.payloadCount {
 				t.Fatalf("numbered placeholder count = %d, want %d", got, testCase.payloadCount)
 			}
 			if !json.Valid(result.body) {
@@ -702,8 +702,8 @@ func TestEncodedCredentialContainersWithoutStringLeavesRedactWholeValue(t *testi
 		t.Fatal("encoded credential-container fixture failed sanitization")
 	}
 	if !result.changed || result.findings != 2 ||
-		!bytes.Contains(result.body, []byte("[密钥]")) ||
-		!bytes.Contains(result.body, []byte("[密钥#2]")) {
+		!bytes.Contains(result.body, []byte("[SECRET]")) ||
+		!bytes.Contains(result.body, []byte("[SECRET#2]")) {
 		t.Fatal("encoded credential containers were not wholly redacted")
 	}
 	if !json.Valid(result.body) {
@@ -1007,8 +1007,8 @@ func TestRequestRendererKeepsEqualityAndDistinguishesValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(result.body)
-	if strings.Count(got, "[邮箱]") != 2 || strings.Count(got, "[邮箱#2]") != 1 {
-		t.Fatalf("unexpected request-local placeholders: base_count=%d numbered_count=%d body_len=%d", strings.Count(got, "[邮箱]"), strings.Count(got, "[邮箱#2]"), len(got))
+	if strings.Count(got, "[EMAIL]") != 2 || strings.Count(got, "[EMAIL#2]") != 1 {
+		t.Fatalf("unexpected request-local placeholders: base_count=%d numbered_count=%d body_len=%d", strings.Count(got, "[EMAIL]"), strings.Count(got, "[EMAIL#2]"), len(got))
 	}
 }
 

@@ -1,12 +1,11 @@
 # CPA Plugin Privacy Filter
 
-English | [简体中文](README.zh-CN.md)
-
 A protocol-aware, request-side privacy filter for
 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It irreversibly
 redacts selected PII and credentials before supported request text is sent to a
 provider. Requests that cannot be inspected safely are actively terminated by
-default.
+default. Project language is English. Agent conventions are in
+[AGENTS.md](AGENTS.md).
 
 > **Do not install the official Plugin Store entry named `privacyfilter`.** As
 > of 2026-09-15, that [Store record](https://github.com/router-for-me/CLIProxyAPI-Plugins-Store/blob/main/registry.json)
@@ -126,12 +125,12 @@ Default placeholders are:
 
 | Kind | First distinct value | Second distinct value |
 |---|---|---|
-| `email` | `[邮箱]` | `[邮箱#2]` |
-| `phone` | `[电话]` | `[电话#2]` |
-| `id_card` | `[身份证]` | `[身份证#2]` |
-| `bank_card` | `[银行卡]` | `[银行卡#2]` |
+| `email` | `[EMAIL]` | `[EMAIL#2]` |
+| `phone` | `[PHONE]` | `[PHONE#2]` |
+| `id_card` | `[ID]` | `[ID#2]` |
+| `bank_card` | `[CARD]` | `[CARD#2]` |
 | `ip` | `[IP]` | `[IP#2]` |
-| `secret` | `[密钥]` | `[密钥#2]` |
+| `secret` | `[SECRET]` | `[SECRET#2]` |
 
 The request cache retains only hashes and replacement labels. It never retains a
 plaintext finding or a reversible mapping.

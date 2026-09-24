@@ -192,6 +192,8 @@ func mlFeatures(text string) []float64 {
 	f[13] = float64(maxRun)
 	lowered := strings.ToLower(text)
 	allow := 0.0
+	// Feature order is fixed by the embedded model. The two Chinese
+	// substrings are training features, not user-facing copy.
 	if strings.Contains(lowered, "example") || strings.Contains(lowered, "placeholder") ||
 		strings.Contains(lowered, "xxx") || strings.Contains(lowered, "test-please-replace") ||
 		strings.Contains(text, "自行申请") || strings.Contains(text, "通讯录") ||

@@ -6,12 +6,12 @@ import (
 )
 
 var defaultPlaceholders = map[Kind]string{
-	KindEmail:    "[邮箱]",
-	KindPhone:    "[电话]",
-	KindIDCard:   "[身份证]",
-	KindBankCard: "[银行卡]",
+	KindEmail:    "[EMAIL]",
+	KindPhone:    "[PHONE]",
+	KindIDCard:   "[ID]",
+	KindBankCard: "[CARD]",
 	KindIP:       "[IP]",
-	KindSecret:   "[密钥]",
+	KindSecret:   "[SECRET]",
 }
 
 // PlaceholderRenderer emits one typed placeholder per Kind. Its map is copied

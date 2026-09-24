@@ -22,7 +22,7 @@ const (
 	pluginID                = "privacyfilter"
 	syntheticValue          = "q7z"
 	reasoningReplayText     = "integrity-replay-value"
-	reasoningSensitiveValue = "replay@example.test"
+	reasoningSensitiveValue = "replay@example.com"
 	maxHTTPBody             = 2 << 20
 )
 
@@ -215,7 +215,7 @@ func serveMock(address string) error {
 		markerPresent := bytes.Contains(body, []byte(syntheticValue))
 		beforeProbePresent := bytes.Contains(body, []byte("before-probe"))
 		afterProbePresent := bytes.Contains(body, []byte("after-probe"))
-		placeholderPresent := bytes.Contains(body, []byte("[密钥]"))
+		placeholderPresent := bytes.Contains(body, []byte("[SECRET]"))
 		toolCallPresent := bytes.Contains(body, []byte("tool_calls"))
 		reasoningReplayPresent := bytes.Contains(body, []byte("reasoning_details"))
 		toolRedacted := validRedactedToolRequest(body)
@@ -268,7 +268,7 @@ func serveMock(address string) error {
 	mux.HandleFunc("POST /v1/responses", func(response http.ResponseWriter, request *http.Request) {
 		body, err := readBounded(request.Body)
 		markerPresent := bytes.Contains(body, []byte(syntheticValue))
-		placeholderPresent := bytes.Contains(body, []byte("[密钥]"))
+		placeholderPresent := bytes.Contains(body, []byte("[SECRET]"))
 		redacted := validRedactedResponsesLiteRequest(body)
 		digest := sha256.Sum256(body)
 
@@ -334,7 +334,7 @@ func validRedactedToolRequest(body []byte) bool {
 		return false
 	}
 	value, ok := arguments["api_key"].(string)
-	return ok && value == "[密钥]"
+	return ok && value == "[SECRET]"
 }
 
 func validReasoningReplayRequest(body []byte) bool {
@@ -360,7 +360,7 @@ func validReasoningReplayRequest(body []byte) bool {
 	if json.Unmarshal(body, &payload) != nil || payload.Model != "mock-model" || len(payload.Messages) != 2 {
 		return false
 	}
-	if payload.Messages[0].Role != "user" || payload.Messages[0].Content != "[邮箱]" {
+	if payload.Messages[0].Role != "user" || payload.Messages[0].Content != "[EMAIL]" {
 		return false
 	}
 	assistant := payload.Messages[1]
@@ -405,7 +405,7 @@ func validRedactedResponsesLiteRequest(body []byte) bool {
 		return false
 	}
 	var customInput map[string]any
-	if json.Unmarshal([]byte(payload.Input[1].Input), &customInput) != nil || len(customInput) != 1 || customInput["AK"] != "[密钥]" {
+	if json.Unmarshal([]byte(payload.Input[1].Input), &customInput) != nil || len(customInput) != 1 || customInput["AK"] != "[SECRET]" {
 		return false
 	}
 	turnRaw, ok := payload.ClientMetadata["x-codex-turn-metadata"]
@@ -417,7 +417,7 @@ func validRedactedResponsesLiteRequest(body []byte) bool {
 		return false
 	}
 	var turn map[string]any
-	if json.Unmarshal([]byte(encodedTurn), &turn) != nil || len(turn) != 1 || turn["api_key"] != "[密钥]" {
+	if json.Unmarshal([]byte(encodedTurn), &turn) != nil || len(turn) != 1 || turn["api_key"] != "[SECRET]" {
 		return false
 	}
 	var sessionID string
