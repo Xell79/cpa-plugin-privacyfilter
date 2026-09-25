@@ -125,14 +125,20 @@ type requestRenderer struct {
 	seen     map[[sha256.Size]byte]string
 	produced map[[sha256.Size]byte]struct{}
 	next     map[privacyengine.Kind]int
+	subLog   *substitutionLogger
 }
 
 func newRequestRenderer(base privacyengine.Renderer) *requestRenderer {
+	return newRequestRendererWithLog(base, nil)
+}
+
+func newRequestRendererWithLog(base privacyengine.Renderer, subLog *substitutionLogger) *requestRenderer {
 	return &requestRenderer{
 		base:     base,
 		seen:     make(map[[sha256.Size]byte]string),
 		produced: make(map[[sha256.Size]byte]struct{}),
 		next:     make(map[privacyengine.Kind]int),
+		subLog:   subLog,
 	}
 }
 
@@ -151,6 +157,9 @@ func (r *requestRenderer) Render(ctx context.Context, finding privacyengine.Find
 	replacement := numberedPlaceholder(base, r.next[finding.Kind])
 	r.seen[key] = replacement
 	r.produced[sha256.Sum256([]byte(replacement))] = struct{}{}
+	if r.subLog != nil {
+		r.subLog.Record(string(finding.Kind), finding.RuleID, replacement, plaintext)
+	}
 	return replacement, nil
 }
 
@@ -181,7 +190,7 @@ func numberedPlaceholder(base string, number int) string {
 }
 
 func (p *privacyFilterPlugin) sanitizeRequest(ctx context.Context, sourceFormat string, body []byte) (sanitizeResult, error) {
-	return p.sanitizeRequestWithRenderer(ctx, sourceFormat, body, newRequestRenderer(p.renderer))
+	return p.sanitizeRequestWithRenderer(ctx, sourceFormat, body, newRequestRendererWithLog(p.renderer, p.subLog))
 }
 
 func (p *privacyFilterPlugin) sanitizeRequestWithRenderer(

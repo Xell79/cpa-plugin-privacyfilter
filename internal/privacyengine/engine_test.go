@@ -322,10 +322,10 @@ func TestPreferredRuleMetadataSurvivesOverlappingPII(t *testing.T) {
 	engine := customEngine(t, `
 [[rules]]
 id = "block-email"
-regex = '''[a-z]+@example\.com'''
-keywords = ["@example."]
-`)
-	const input = "test@example.com"
+	regex = '''[a-z]+@user\.example'''
+	keywords = ["@user."]
+	`)
+	const input = "test@user.example"
 
 	baseline, err := engine.Detect(context.Background(), input, RequestOptions{})
 	if err != nil {
@@ -390,15 +390,15 @@ id = "never"
 regex = '''NEVER_MATCH_THIS_VALUE'''
 keywords = ["NEVER_MATCH"]
 `)
-	input := "x alice@example.com x 13812345678 192.0.2.1 x4111111111111111"
+	input := "x alice@user.example x 13812345678 8.8.8.8"
 	findings, err := engine.Detect(context.Background(), input, RequestOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(findings) != 4 {
+	if len(findings) != 3 {
 		t.Fatalf("got %d findings: %+v", len(findings), findings)
 	}
-	if findings[0].Start != len("x ") || input[findings[0].Start:findings[0].End] != "alice@example.com" {
+	if findings[0].Start != len("x ") || input[findings[0].Start:findings[0].End] != "alice@user.example" {
 		t.Fatalf("offset is not a UTF-8 byte span: %+v", findings[0])
 	}
 	findingType := reflect.TypeOf(Finding{})
@@ -532,13 +532,13 @@ regex = '''NEVER_MATCH'''
 	}
 
 	findingBudget, _ := NewBudget(Limits{MaxBytes: 1000, MaxFindings: 1, MaxNodes: 10})
-	if _, err := engine.Detect(context.Background(), "a@example.com b@example.com", RequestOptions{Budget: findingBudget}); !errors.Is(err, ErrBudgetExceeded) {
+	if _, err := engine.Detect(context.Background(), "a@user.example b@user.example", RequestOptions{Budget: findingBudget}); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("finding limit: %v", err)
 	}
 
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := engine.Detect(cancelled, "a@example.com", RequestOptions{}); !errors.Is(err, context.Canceled) {
+	if _, err := engine.Detect(cancelled, "a@user.example", RequestOptions{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel: %v", err)
 	}
 
@@ -547,11 +547,96 @@ regex = '''NEVER_MATCH'''
 		seenPlaintext = plaintext
 		return "<" + string(finding.Kind) + ">", nil
 	})
-	result, err := engine.Redact(context.Background(), "mail a@example.com", RequestOptions{Renderer: renderer})
+	result, err := engine.Redact(context.Background(), "mail a@user.example", RequestOptions{Renderer: renderer})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if seenPlaintext != "a@example.com" || result.Redacted != "mail <email>" {
+	if seenPlaintext != "a@user.example" || result.Redacted != "mail <email>" {
 		t.Fatalf("request renderer mismatch: plaintext_len=%d redacted_len=%d findings=%d", len(seenPlaintext), len(result.Redacted), len(result.Findings))
+	}
+}
+
+func TestDocumentationIPv4IsNotPublic(t *testing.T) {
+	for _, value := range []string{"192.0.2.1", "198.51.100.10", "203.0.113.5", "10.1.2.3", "127.0.0.1"} {
+		if !isNonPublicIPv4(value) {
+			t.Fatalf("%s was treated as public", value)
+		}
+	}
+	if isNonPublicIPv4("8.8.8.8") {
+		t.Fatal("public address was treated as non-public")
+	}
+}
+
+func TestEntropyTokenByteMatchesASCIISet(t *testing.T) {
+	for value := 0; value < 256; value++ {
+		byteValue := byte(value)
+		want := (byteValue >= 'a' && byteValue <= 'z') ||
+			(byteValue >= 'A' && byteValue <= 'Z') ||
+			(byteValue >= '0' && byteValue <= '9') ||
+			byteValue == '+' || byteValue == '/' || byteValue == '=' || byteValue == '_' || byteValue == '-'
+		if isEntropyTokenByte(byteValue) != want {
+			t.Fatalf("byte %d classified incorrectly", value)
+		}
+	}
+}
+
+func TestContextSecretRequiresLongAssignment(t *testing.T) {
+	engine, _ := embeddedEngine(t)
+	secret := "set PASSWORD=hunter2ok please"
+	findings, err := engine.Detect(context.Background(), secret, RequestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].RuleID != ruleContextSecret || secret[findings[0].Start:findings[0].End] != "hunter2ok" {
+		t.Fatalf("long assignment not captured: %+v", findings)
+	}
+	for _, noise := range []string{
+		"password=short",
+		"token=abcdefghijklmnop",
+		"pwd=CorrectHorseBattery",
+		"the secret is CorrectHorseBattery",
+	} {
+		got, err := engine.Detect(context.Background(), noise, RequestOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, finding := range got {
+			if finding.RuleID == ruleContextSecret {
+				t.Fatalf("context secret matched noise of length %d", len(noise))
+			}
+		}
+	}
+}
+
+func TestPaymentCardRequiresIssuerPrefix(t *testing.T) {
+	engine, _ := embeddedEngine(t)
+	card := "4012888888881881"
+	findings, err := engine.Detect(context.Background(), "pay "+card, RequestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(findings) != 1 || findings[0].RuleID != rulePIIBankCard {
+		t.Fatalf("visa pan not detected: %+v", findings)
+	}
+	for _, noise := range []string{
+		"6011111111111117",
+		"000000000000000",
+		"https://user:pass@host.example/x",
+		"user:ada@host.example",
+	} {
+		got, err := engine.Detect(context.Background(), noise, RequestOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("noise of length %d produced %d findings", len(noise), len(got))
+		}
+	}
+	mail, err := engine.Detect(context.Background(), "write ada@user.example", RequestOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mail) != 1 || mail[0].Kind != KindEmail {
+		t.Fatalf("plain email missed: %+v", mail)
 	}
 }

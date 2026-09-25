@@ -209,7 +209,7 @@ func TestValidReasoningReplayRequest(t *testing.T) {
 		nil,
 		[]byte(`{}`),
 		bytes.Replace(valid, []byte(`"model":"mock-model"`), []byte(`"model":"other"`), 1),
-		bytes.Replace(valid, []byte(`"content":"[EMAIL]"`), []byte(`"content":"replay@example.com"`), 1),
+		bytes.Replace(valid, []byte(`"content":"[EMAIL]"`), []byte(`"content":"replay@user.example"`), 1),
 		bytes.Replace(valid, []byte(`"content":"answer"`), []byte(`"content":"other"`), 1),
 		bytes.Replace(valid, []byte(`"reasoning":"integrity-replay-value"`), []byte(`"reasoning":"changed"`), 1),
 		bytes.Replace(valid, []byte(`"reasoning_content":"integrity-replay-value"`), []byte(`"reasoning_content":"changed"`), 1),

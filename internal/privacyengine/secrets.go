@@ -20,10 +20,11 @@ const (
 	contextOverlapLookahead = 64 // bytes into a candidate
 )
 
-// Chinese keywords stay beside the English ones so a secret written as
-// "密码=..." is still detected. They are match text, not UI copy.
+// Context values shorter than 8 bytes are ordinary words next to a keyword,
+// not credentials. Chinese keywords stay beside the English ones so a secret
+// written as "密码=..." is still detected. They are match text, not UI copy.
 var reContextSecret = regexp.MustCompile(
-	`(?i)(密码|口令|密钥|password|passwd|pwd|secret|token|api[_\s-]?key)\s*(?:是|为|:|：|=)\s*['"]?([^\s'"，。；;]{4,})`)
+	`(?i)(?:PASSWORD|PASSWD|SECRET|API_KEY|PRIVATE_KEY|ACCESS_KEY|AUTH_TOKEN|ENCRYPTION_KEY|SIGNING_KEY|DB_PASSWORD|DATABASE_PASSWORD|密码|口令|密钥)\s*[=:：]\s*['"]?([^\s'"，。；;]{8,})`)
 
 var reSecretContext = regexp.MustCompile(
 	`(?i)(?:password|passwd|pwd|secret|token|api[_\s-]?key|access[_\s-]?key|bearer|authorization|credential|jwt|密码|口令|密钥|凭证|令牌|鉴权)`)
@@ -43,7 +44,7 @@ var urlPrefixes = []string{
 var (
 	reTemplateVar           = regexp.MustCompile(`^(?:\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}|\$\{\{\s*(?i:secrets)\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$\([A-Za-z_][A-Za-z0-9_]*\)|%\{[A-Za-z_][A-Za-z0-9_]*\}|<[A-Za-z_][A-Za-z0-9_]*>)$`)
 	reSimpleVar             = regexp.MustCompile(`(?i)^(?:\$[A-Za-z_][A-Za-z0-9_]*|\$env:[A-Za-z_][A-Za-z0-9_]*|%[A-Za-z_][A-Za-z0-9_]*%)$`)
-	reCredentialPlaceholder = regexp.MustCompile(`(?i)^(?:(?:redacted|masked|hidden)(?:#[0-9]+)?|\[(?:redacted|masked|hidden|secret|credential|api[_ -]?key|e-?mail|phone|id(?:_card)?|card|bank_card|ip(?:_address)?|邮箱|电话|身份证|银行卡|密钥)(?:#[0-9]+)?\])$`)
+	reCredentialPlaceholder = regexp.MustCompile(`(?i)^(?:(?:redacted|masked|hidden)(?:#[0-9]+)?|\[(?:redacted|masked|hidden|secret|credential|api[_ -]?key|e-?mail|phone|id(?:_card)?|card|bank_card|ip(?:_address)?|邮箱|电话|身份证|银行卡|密钥)(?:#\d+)?\])$`)
 	reMaskOnly              = regexp.MustCompile(`^[*xX._-]{3,}$`)
 	reUUID                  = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	reHexOnly               = regexp.MustCompile(`^[0-9a-fA-F]+$`)
@@ -65,7 +66,10 @@ var commonPlaceholders = []string{
 }
 
 func (e *Engine) detectSecrets(ctx context.Context, text string, collector *spanCollector) error {
-	lowerText := strings.ToLower(text)
+	lowerText := text
+	if hasASCIIUpper(text) {
+		lowerText = strings.ToLower(text)
+	}
 	for i := range e.rules {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -126,14 +130,14 @@ func (e *Engine) detectSecrets(ctx context.Context, text string, collector *span
 	}
 
 	if err := forEachSubmatchIndex(ctx, reContextSecret, text, func(indices []int) error {
-		if len(indices) < 6 || indices[4] < 0 || indices[5] <= indices[4] || indices[5] > len(text) {
+		if len(indices) < 4 || indices[2] < 0 || indices[3] <= indices[2] || indices[3] > len(text) {
 			return nil
 		}
-		value := text[indices[4]:indices[5]]
-		if isTemplateVar(value) || (len(value) <= 16 && shannonEntropy(value) < 3.0) {
+		value := text[indices[2]:indices[3]]
+		if isContextSecretNoise(value) {
 			return nil
 		}
-		return collector.add(span{start: indices[4], end: indices[5], kind: KindSecret, ruleID: ruleContextSecret})
+		return collector.add(span{start: indices[2], end: indices[3], kind: KindSecret, ruleID: ruleContextSecret})
 	}); err != nil {
 		return err
 	}
@@ -141,7 +145,7 @@ func (e *Engine) detectSecrets(ctx context.Context, text string, collector *span
 	return forEachEntropyToken(ctx, text, func(start, end int) error {
 		candidate := text[start:end]
 		strong := hasStrongSecretContext(text, start, end)
-		if !strong && isOnPathOrURLBoundary(text, start, end) {
+		if isFilesystemPath(candidate) || (!strong && isOnPathOrURLBoundary(text, start, end)) {
 			return nil
 		}
 		if isTemplateVar(candidate) || isHexHash(candidate) || isUUID(candidate) || isBusinessIDAssignment(candidate) {
@@ -266,6 +270,27 @@ func normalizeCredentialFieldKey(key string) string {
 		}
 	}
 	return normalized.String()
+}
+
+func isContextSecretNoise(value string) bool {
+	if isCredentialPlaceholder(value) || isTemplateVar(value) || strings.Contains(value, "${") {
+		return true
+	}
+	if len(value) <= 16 && shannonEntropy(value) < 3.0 {
+		return true
+	}
+	// A keyword mention of a short code identifier is not a secret value.
+	if len(value) <= 24 && strings.ContainsAny(value, "()[]{}") {
+		return true
+	}
+	return false
+}
+
+func isFilesystemPath(value string) bool {
+	if strings.Count(value, "/") < 2 {
+		return false
+	}
+	return strings.HasPrefix(value, "/") || strings.HasPrefix(value, "./") || strings.HasPrefix(value, "../")
 }
 
 func isCredentialPlaceholder(value string) bool {
@@ -569,11 +594,36 @@ func forEachEntropyToken(ctx context.Context, text string, visit func(start, end
 	return nil
 }
 
+func hasASCIIUpper(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 'A' && value[i] <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+// entropyTokenByte is one comparison per input byte. The set is ASCII letters,
+// digits, and the base64/url token characters used by forEachEntropyToken.
+var entropyTokenByte = func() [256]bool {
+	var table [256]bool
+	for value := byte('a'); value <= 'z'; value++ {
+		table[value] = true
+	}
+	for value := byte('A'); value <= 'Z'; value++ {
+		table[value] = true
+	}
+	for value := byte('0'); value <= '9'; value++ {
+		table[value] = true
+	}
+	for _, value := range []byte{'+', '/', '=', '_', '-'} {
+		table[value] = true
+	}
+	return table
+}()
+
 func isEntropyTokenByte(value byte) bool {
-	return value >= 'a' && value <= 'z' ||
-		value >= 'A' && value <= 'Z' ||
-		value >= '0' && value <= '9' ||
-		value == '+' || value == '/' || value == '=' || value == '_' || value == '-'
+	return entropyTokenByte[value]
 }
 
 func forEachMatchIndex(ctx context.Context, re *regexp.Regexp, text string, visit func(start, end int) error) error {

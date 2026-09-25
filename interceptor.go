@@ -21,6 +21,7 @@ type privacyFilterPlugin struct {
 	blockRuleIDs map[string]struct{}
 	cache        *RequestScanCache
 	revision     uint64
+	subLog       *substitutionLogger
 }
 
 var _ pluginapi.RequestInterceptor = (*privacyFilterPlugin)(nil)
@@ -43,8 +44,10 @@ func (p *privacyFilterPlugin) InterceptRequestBeforeAuth(ctx context.Context, re
 	return p.interceptRequest(ctx, req)
 }
 
-func (p *privacyFilterPlugin) InterceptRequestAfterAuth(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
-	return p.interceptRequest(ctx, req)
+func (p *privacyFilterPlugin) InterceptRequestAfterAuth(_ context.Context, _ pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
+	// The host has already applied provider credentials from Auth Files.
+	// Scanning this body redacts those credentials and breaks the upstream call.
+	return pluginapi.RequestInterceptResponse{}, nil
 }
 
 func (p *privacyFilterPlugin) interceptRequest(ctx context.Context, req pluginapi.RequestInterceptRequest) (pluginapi.RequestInterceptResponse, error) {
@@ -72,7 +75,7 @@ func (p *privacyFilterPlugin) interceptRequest(ctx context.Context, req pluginap
 		return pluginapi.RequestInterceptResponse{}, nil
 	}
 	rendererState := state.GetOrCreateRendererState(func() any {
-		return newRequestRenderer(p.renderer)
+		return newRequestRendererWithLog(p.renderer, p.subLog)
 	})
 	renderer, ok := rendererState.(*requestRenderer)
 	if !ok || renderer == nil {

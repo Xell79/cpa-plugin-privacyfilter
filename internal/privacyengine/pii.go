@@ -5,6 +5,7 @@ package privacyengine
 
 import (
 	"context"
+	"net"
 	"regexp"
 	"strings"
 )
@@ -61,6 +62,56 @@ func ipBounded(text string, start, end int) bool {
 	return true
 }
 
+func isDocumentationEmail(email string) bool {
+	at := strings.LastIndexByte(email, '@')
+	if at < 0 || at+1 >= len(email) {
+		return false
+	}
+	domain := strings.ToLower(email[at+1:])
+	switch domain {
+	case "example.com", "example.org", "example.net", "example.edu":
+		return true
+	default:
+		return strings.HasSuffix(domain, ".invalid") || strings.HasSuffix(domain, ".localhost")
+	}
+}
+
+func isNonPublicIPv4(value string) bool {
+	ip := net.ParseIP(value).To4()
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return true
+	}
+	// RFC 5737 documentation ranges: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24.
+	return (ip[0] == 192 && ip[1] == 0 && ip[2] == 2) ||
+		(ip[0] == 198 && ip[1] == 51 && ip[2] == 100) ||
+		(ip[0] == 203 && ip[1] == 0 && ip[2] == 113)
+}
+
+func isExampleBankCard(number string) bool {
+	if len(number) == 0 {
+		return false
+	}
+	same := true
+	for i := 1; i < len(number); i++ {
+		if number[i] != number[0] {
+			same = false
+			break
+		}
+	}
+	if same {
+		return true
+	}
+	switch number {
+	case "4111111111111111", "4242424242424242", "4000000000000002", "5555555555554444", "378282246310005":
+		return true
+	default:
+		return false
+	}
+}
+
 func luhnValid(number string) bool {
 	if number == "" {
 		return false
@@ -84,12 +135,37 @@ func luhnValid(number string) bool {
 	return sum%10 == 0
 }
 
+// hasPaymentCardPrefix accepts Visa, Mastercard, and American Express
+// issuer ranges. A Luhn-valid digit run outside those ranges is not a card.
+func hasPaymentCardPrefix(number string) bool {
+	if len(number) < 13 {
+		return false
+	}
+	switch number[0] {
+	case '4':
+		return len(number) == 13 || len(number) == 16 || len(number) == 19
+	case '5':
+		return len(number) == 16 && number[1] >= '1' && number[1] <= '5'
+	case '3':
+		return len(number) == 15 && (number[1] == '4' || number[1] == '7')
+	default:
+		return false
+	}
+}
+
+// isEmailBoundary reports whether an address is a user identity rather than
+// part of a URL or a user:password token. A colon or slash immediately before
+// the local part is that boundary.
+func isEmailBoundary(text string, start int) bool {
+	return start == 0 || (text[start-1] != ':' && text[start-1] != '/')
+}
+
 func detectPII(ctx context.Context, text string, collector *spanCollector) error {
 	if err := forEachMatchIndex(ctx, reEmail, text, func(start, end int) error {
 		if end < len(text) && text[end] == ':' && end+1 < len(text) && text[end+1] != ' ' && text[end+1] != '\t' {
 			return nil
 		}
-		if isInSSHCommandContext(text, start) {
+		if !isEmailBoundary(text, start) || isInSSHCommandContext(text, start) || isDocumentationEmail(text[start:end]) {
 			return nil
 		}
 		return collector.add(span{start: start, end: end, kind: KindEmail, ruleID: rulePIIEmail})
@@ -129,7 +205,7 @@ func detectPII(ctx context.Context, text string, collector *spanCollector) error
 		return err
 	}
 	if err := forEachMatchIndex(ctx, reIPv4, text, func(start, end int) error {
-		if !ipBounded(text, start, end) {
+		if !ipBounded(text, start, end) || isNonPublicIPv4(text[start:end]) {
 			return nil
 		}
 		return collector.add(span{start: start, end: end, kind: KindIP, ruleID: rulePIIIPv4})
@@ -137,7 +213,8 @@ func detectPII(ctx context.Context, text string, collector *spanCollector) error
 		return err
 	}
 	return forEachMatchIndex(ctx, reBankCard, text, func(start, end int) error {
-		if !digitBounded(text, start, end) || !luhnValid(text[start:end]) {
+		number := text[start:end]
+		if !digitBounded(text, start, end) || !hasPaymentCardPrefix(number) || !luhnValid(number) || isExampleBankCard(number) {
 			return nil
 		}
 		return collector.add(span{start: start, end: end, kind: KindBankCard, ruleID: rulePIIBankCard})

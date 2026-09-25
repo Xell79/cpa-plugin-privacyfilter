@@ -114,7 +114,7 @@ func TestReplacementRendererOverridesTypedLabel(t *testing.T) {
 }
 
 func TestBuildPluginRejectsSensitiveReplacement(t *testing.T) {
-	_, err := buildPlugin([]byte("replacements:\n  email: test@example.com\n"), t.TempDir())
+	_, err := buildPlugin([]byte("replacements:\n  email: test@user.example\n"), t.TempDir())
 	if err == nil {
 		t.Fatal("buildPlugin accepted a replacement that the engine redacts")
 	}

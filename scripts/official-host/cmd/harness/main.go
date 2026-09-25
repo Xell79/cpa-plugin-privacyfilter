@@ -22,7 +22,7 @@ const (
 	pluginID                = "privacyfilter"
 	syntheticValue          = "q7z"
 	reasoningReplayText     = "integrity-replay-value"
-	reasoningSensitiveValue = "replay@example.com"
+	reasoningSensitiveValue = "replay@user.example"
 	maxHTTPBody             = 2 << 20
 )
 
@@ -481,6 +481,11 @@ func configFieldsExact(fields []pluginConfigField) bool {
 			Name:        "skip_formats",
 			Type:        "array",
 			Description: "Trusted break-glass source formats to bypass inspection.",
+		},
+		{
+			Name:        "substitution_log",
+			Type:        "object",
+			Description: "Optional log of substitutions. Default: enabled false, path logs/privacyfilter-substitutions.jsonl. When enabled, appends timestamped original values to that JSONL file. Rotation is provided by the host logrotate rule.",
 		},
 	}
 	if len(fields) != len(expected) {

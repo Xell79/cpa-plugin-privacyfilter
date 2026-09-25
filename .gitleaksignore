@@ -1,0 +1,4 @@
+# Gitleaks / Betterleaks ignore list for test seeds
+864928db72b674458784290c7ab896c7d00571f7:internal/privacyengine/fuzz_test.go:generic-api-key:18
+0c6dcefa5b61380d0e70e3dec5bcc5edbfaf6fce:internal/privacyengine/fuzz_test.go:generic-api-key:18
+25f09dac17ce42c61e02a47aebe5c9adf22f5032:internal/privacyengine/fuzz_test.go:generic-api-key:18

@@ -18,6 +18,12 @@ __pycache__/
 .opencode/
 .claude/
 .cursor/
+.rumdl_cache/
+
+# Local logs and test artifacts
+logs/
+*.jsonl
+*.out
 
 # Local review notes. Do not publish.
 security_best_practices_report.md

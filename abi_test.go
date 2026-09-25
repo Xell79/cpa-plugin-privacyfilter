@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -198,6 +200,27 @@ func TestRegistrationNegotiatesLifecycleCapability(t *testing.T) {
 				t.Fatalf("lifecycle capability = %v, want %v", reg.Capabilities.RequestLifecyclePlugin, tc.wantLifecycle)
 			}
 		})
+	}
+}
+
+func TestReconfigureClosesPreviousSubstitutionLog(t *testing.T) {
+	resetABIStateForTest(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "substitutions.jsonl")
+	config := []byte("on_error: passthrough\nsubstitution_log:\n  enabled: true\n  path: " + path + "\n")
+	registerWithConfigForTest(t, 2, config)
+	privacyFilterABIState.RLock()
+	first := privacyFilterABIState.plugin
+	privacyFilterABIState.RUnlock()
+	if first == nil || first.subLog == nil || first.subLog.file == nil {
+		t.Fatal("first registration did not open the substitution log")
+	}
+	registerWithConfigForTest(t, 2, config)
+	if first.subLog.file != nil {
+		t.Fatal("reconfigure left the previous substitution log open")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal(err)
 	}
 }
 

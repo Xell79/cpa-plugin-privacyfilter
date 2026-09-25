@@ -37,7 +37,7 @@ func BenchmarkSanitizeRequestSizes(b *testing.B) {
 
 func benchmarkRequestBody(size int) []byte {
 	prefix := []byte(`{"model":"privacy-benchmark","messages":[{"role":"user","content":"`)
-	suffix := []byte(` benchmark@example.com"}]}`)
+	suffix := []byte(` benchmark@user.example"}]}`)
 	if size < len(prefix)+len(suffix) {
 		size = len(prefix) + len(suffix)
 	}

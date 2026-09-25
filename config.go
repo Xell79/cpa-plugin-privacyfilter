@@ -62,8 +62,9 @@ type limitsConfig struct {
 type privacyFilterConfig struct {
 	// CLIProxyAPI currently includes these host-owned fields in the YAML passed to
 	// native plugins. Accept but never use them; the host enforces both values.
-	Enabled  bool `yaml:"enabled"`
-	Priority int  `yaml:"priority"`
+	Enabled  bool           `yaml:"enabled"`
+	Priority int            `yaml:"priority"`
+	Store    map[string]any `yaml:"store"`
 
 	// Existing v0.2 fields remain valid.
 	GitleaksTOML string   `yaml:"gitleaks_toml"`
@@ -81,6 +82,9 @@ type privacyFilterConfig struct {
 	// It only rescores texts the deterministic engine left clean; it never
 	// overrides engine findings. Disabled by default.
 	MLAssist mlAssistConfig `yaml:"ml_assist"`
+	// SubstitutionLog writes original values and placeholders to a rotating
+	// file. Off by default because the file contains matched plaintext.
+	SubstitutionLog substitutionLogConfig `yaml:"substitution_log"`
 }
 
 // mlAssistMode selects what happens when the ML second opinion fires.
@@ -198,6 +202,12 @@ func (cfg privacyFilterConfig) validate() error {
 	}
 	if cfg.MLAssist.Threshold < 0 || cfg.MLAssist.Threshold > 1 {
 		return fmt.Errorf("invalid privacyfilter config: ml_assist.threshold must be within [0,1]")
+	}
+	if cfg.SubstitutionLog.Enabled && strings.TrimSpace(cfg.SubstitutionLog.effectivePath()) == "" {
+		return fmt.Errorf("invalid privacyfilter config: substitution_log.path is empty")
+	}
+	if path := strings.TrimSpace(cfg.SubstitutionLog.Path); path != "" && !filepath.IsAbs(path) && strings.HasPrefix(filepath.Clean(path), "..") {
+		return fmt.Errorf("invalid privacyfilter config: substitution_log.path must not escape the working directory")
 	}
 	seenRules := make(map[string]struct{}, len(cfg.BlockRuleIDs))
 	for _, ruleID := range cfg.BlockRuleIDs {

@@ -20,6 +20,15 @@ func (p *privacyFilterPlugin) HandleRequestComplete(_ context.Context, done plug
 	return nil
 }
 
+// Close releases the substitution log. The host does not call this; tests and
+// shutdown paths do.
+func (p *privacyFilterPlugin) Close() error {
+	if p == nil || p.subLog == nil {
+		return nil
+	}
+	return p.subLog.Close()
+}
+
 func releaseRequestScanState(cache *RequestScanCache, done pluginapi.RequestCompletion) {
 	if cache == nil || done.RequestID == "" {
 		return

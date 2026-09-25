@@ -1,0 +1,16 @@
+# Daily rotation for the privacyfilter substitution log.
+# Installed by scripts/install-substitution-logrotate.sh.
+# The path must match substitution_log.path. The default is relative to the
+# CLIProxyAPI working directory.
+/opt/cli-proxy-api/logs/privacyfilter-substitutions.jsonl {
+    daily
+    missingok
+    notifempty
+    rotate 7
+    compress
+    delaycompress
+    dateext
+    dateformat -%Y%m%d
+    su root root
+    create 0640 root root
+}

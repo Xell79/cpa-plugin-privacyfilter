@@ -309,6 +309,7 @@ func PrivacyFilterPluginFree(ptr unsafe.Pointer, _ C.size_t) {
 func PrivacyFilterPluginShutdown() {
 	privacyFilterABIState.Lock()
 	privacyFilterABIState.shuttingDown = true
+	plugin := privacyFilterABIState.plugin
 	privacyFilterABIState.plugin = nil
 	privacyFilterABIState.host = nil
 	runtime := privacyFilterABIState.runtime
@@ -317,6 +318,9 @@ func PrivacyFilterPluginShutdown() {
 	privacyFilterABIState.inFlight.Wait()
 	if runtime != nil && runtime.cache != nil {
 		runtime.cache.Clear()
+	}
+	if plugin != nil {
+		_ = plugin.Close()
 	}
 	privacyFilterABIState.Lock()
 	if privacyFilterABIState.runtime == runtime {
@@ -408,9 +412,16 @@ func handlePrivacyFilterRegister(request []byte) ([]byte, error) {
 		plugin.Capabilities.RequestLifecyclePlugin = nil
 	}
 	privacyFilterABIState.Lock()
+	previous := privacyFilterABIState.plugin
 	privacyFilterABIState.plugin = p
 	privacyFilterABIState.shuttingDown = false
 	privacyFilterABIState.Unlock()
+	// In-flight requests still hold the previous plugin and finish against it.
+	// Close only drops the substitution-log descriptor; Record checks closed
+	// under the same mutex, so a late write cannot use a closed file.
+	if previous != nil && previous != p {
+		_ = previous.Close()
+	}
 	log.WithFields(log.Fields{
 		"version":  pluginVersion,
 		"revision": pluginRevision,

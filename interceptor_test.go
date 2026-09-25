@@ -56,7 +56,7 @@ func redactForTest(t *testing.T, p *privacyFilterPlugin, sourceFormat, body stri
 
 func TestRedactRequestBody_EmailInContent(t *testing.T) {
 	p := newTestPlugin(t)
-	body := `{"model":"gpt-4","messages":[{"role":"user","content":"my email is test@example.com"}]}`
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"my email is test@user.example"}]}`
 	modified, findings, err := redactForTest(t, p, "openai", body)
 	if err != nil {
 		t.Fatalf("redactRequestBody() error = %v", err)
@@ -64,7 +64,7 @@ func TestRedactRequestBody_EmailInContent(t *testing.T) {
 	if findings != 1 || modified == nil {
 		t.Fatalf("findings=%d modified=%v, want one redaction", findings, modified != nil)
 	}
-	if !strings.Contains(string(modified), "[EMAIL]") || strings.Contains(string(modified), "test@example.com") {
+	if !strings.Contains(string(modified), "[EMAIL]") || strings.Contains(string(modified), "test@user.example") {
 		t.Fatalf("email was not safely redacted: findings=%d body_len=%d", findings, len(modified))
 	}
 }
@@ -95,19 +95,19 @@ func TestRedactRequestBody_MultiPartContent(t *testing.T) {
 
 func TestRedactRequestBody_ResponsesStringInput(t *testing.T) {
 	p := newTestPlugin(t)
-	body := `{"model":"gpt-4","input":"my email is test@example.com"}`
+	body := `{"model":"gpt-4","input":"my email is test@user.example"}`
 	modified, findings, err := redactForTest(t, p, "openai-response", body)
 	if err != nil {
 		t.Fatalf("redactRequestBody() error = %v", err)
 	}
-	if findings != 1 || modified == nil || strings.Contains(string(modified), "test@example.com") {
+	if findings != 1 || modified == nil || strings.Contains(string(modified), "test@user.example") {
 		t.Fatalf("email was not safely redacted: findings=%d body_len=%d", findings, len(modified))
 	}
 }
 
 func TestRedactRequestBody_PreservesLargeInteger(t *testing.T) {
 	p := newTestPlugin(t)
-	body := `{"id":9007199254740993,"messages":[{"role":"user","content":"test@example.com"}]}`
+	body := `{"id":9007199254740993,"messages":[{"role":"user","content":"test@user.example"}]}`
 	modified, _, err := redactForTest(t, p, "openai", body)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +120,7 @@ func TestRedactRequestBody_PreservesLargeInteger(t *testing.T) {
 func TestInterceptRequest_SkippedModel(t *testing.T) {
 	p := newTestPlugin(t)
 	p.cfg.SkipModels = []string{"gpt-4"}
-	body := `{"model":"gpt-4","messages":[{"role":"user","content":"test@example.com"}]}`
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"test@user.example"}]}`
 	resp, err := p.interceptRequest(context.Background(), pluginapi.RequestInterceptRequest{
 		Model: "gpt-4",
 		Body:  []byte(body),
@@ -136,7 +136,7 @@ func TestInterceptRequest_SkippedModel(t *testing.T) {
 func TestInterceptRequest_SkippedRequestedModel(t *testing.T) {
 	p := newTestPlugin(t)
 	p.cfg.SkipModels = []string{"gpt-4"}
-	body := `{"model":"upstream-model","messages":[{"role":"user","content":"test@example.com"}]}`
+	body := `{"model":"upstream-model","messages":[{"role":"user","content":"test@user.example"}]}`
 	resp, err := p.interceptRequest(context.Background(), pluginapi.RequestInterceptRequest{
 		Model:          "upstream-model",
 		RequestedModel: "gpt-4",
@@ -150,9 +150,9 @@ func TestInterceptRequest_SkippedRequestedModel(t *testing.T) {
 	}
 }
 
-func TestInterceptRequestAfterAuth_RedactsFinalRequest(t *testing.T) {
+func TestInterceptRequestAfterAuth_PassesBodyThrough(t *testing.T) {
 	p := newTestPlugin(t)
-	body := `{"model":"gpt-4","messages":[{"role":"user","content":"test@example.com"}]}`
+	body := `{"model":"gpt-4","messages":[{"role":"user","content":"test@user.example"}]}`
 	resp, err := p.InterceptRequestAfterAuth(context.Background(), pluginapi.RequestInterceptRequest{
 		SourceFormat: "openai",
 		Model:        "gpt-4",
@@ -161,8 +161,8 @@ func TestInterceptRequestAfterAuth_RedactsFinalRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Body == nil || resp.Terminate || strings.Contains(string(resp.Body), "test@example.com") {
-		t.Fatalf("unexpected response: terminate=%t status=%d body_len=%d", resp.Terminate, resp.StatusCode, len(resp.Body))
+	if resp.Body != nil || resp.Terminate {
+		t.Fatalf("after-auth must not redact provider credentials: terminate=%t status=%d body_len=%d", resp.Terminate, resp.StatusCode, len(resp.Body))
 	}
 }
 
@@ -198,7 +198,7 @@ func TestInterceptRequest_InvalidJSONFailsClosed(t *testing.T) {
 	p := newTestPlugin(t)
 	for _, body := range [][]byte{
 		nil,
-		[]byte(`not valid json with email test@example.com`),
+		[]byte(`not valid json with email test@user.example`),
 	} {
 		resp, err := p.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
 			SourceFormat: "openai",
@@ -249,8 +249,8 @@ func TestBlockingRuleWinsWhenItsSpanOverlapsPII(t *testing.T) {
 		CustomTOML: []byte(`
 [[rules]]
 id = "block-email"
-regex = '''[a-z]+@example\.com'''
-keywords = ["@example."]
+	regex = '''[a-z]+@user\.example'''
+	keywords = ["@user."]
 `),
 		CustomMode: privacyengine.CustomRulesReplace,
 	})
@@ -262,7 +262,7 @@ keywords = ["@example."]
 
 	resp, err := p.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
 		SourceFormat: "openai",
-		Body:         []byte(`{"messages":[{"role":"user","content":"test@example.com"}]}`),
+		Body:         []byte(`{"messages":[{"role":"user","content":"test@user.example"}]}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -277,7 +277,7 @@ func TestAuditModeDetectsWithoutMutation(t *testing.T) {
 	p.cfg.Mode = modeAudit
 	resp, err := p.InterceptRequestBeforeAuth(context.Background(), pluginapi.RequestInterceptRequest{
 		SourceFormat: "openai",
-		Body:         []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"test@example.com"}]}`),
+		Body:         []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"test@user.example"}]}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -980,12 +980,12 @@ func TestShortCredentialRuleDoesNotTreatPlainToolOutputAsField(t *testing.T) {
 
 func TestEncodedToolJSONPreservesLargeInteger(t *testing.T) {
 	p := newTestPlugin(t)
-	const body = `{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"id\":9007199254740993,\"email\":\"test@example.com\"}"}}]}]}`
+	const body = `{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{\"id\":9007199254740993,\"email\":\"test@user.example\"}"}}]}]}`
 	result, err := p.sanitizeRequest(context.Background(), "openai", []byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !result.changed || strings.Contains(string(result.body), "test@example.com") {
+	if !result.changed || strings.Contains(string(result.body), "test@user.example") {
 		t.Fatalf("tool JSON not sanitized: changed=%t findings=%d body_len=%d", result.changed, result.findings, len(result.body))
 	}
 	if !strings.Contains(string(result.body), `9007199254740993`) {
@@ -1001,7 +1001,7 @@ func TestEmptyReplacementStaysEmptyForMultipleValues(t *testing.T) {
 
 func TestRequestRendererKeepsEqualityAndDistinguishesValues(t *testing.T) {
 	p := newTestPlugin(t)
-	const body = `{"model":"m","messages":[{"role":"user","content":"a@example.com b@example.com a@example.com"}]}`
+	const body = `{"model":"m","messages":[{"role":"user","content":"a@user.example b@user.example a@user.example"}]}`
 	result, err := p.sanitizeRequest(context.Background(), "openai", []byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -1027,8 +1027,8 @@ func TestNoFindingLeavesOriginalBytesUntouched(t *testing.T) {
 func TestUnsupportedFormatAndShapeFailClosed(t *testing.T) {
 	p := newTestPlugin(t)
 	for _, req := range []pluginapi.RequestInterceptRequest{
-		{SourceFormat: "codex", Body: []byte(`{"input":"test@example.com"}`)},
-		{SourceFormat: "openai", Body: []byte(`{"messages":[{"role":"user","content":[{"type":"future_block","text":"test@example.com"}]}]}`)},
+		{SourceFormat: "codex", Body: []byte(`{"input":"test@user.example"}`)},
+		{SourceFormat: "openai", Body: []byte(`{"messages":[{"role":"user","content":[{"type":"future_block","text":"test@user.example"}]}]}`)},
 	} {
 		resp, err := p.InterceptRequestBeforeAuth(context.Background(), req)
 		if err != nil {
@@ -1895,14 +1895,14 @@ func TestMalformedEncodedToolArgumentsFailClosed(t *testing.T) {
 	}
 }
 
-func TestBeforeAndUnchangedAfterScanOnlyOnce(t *testing.T) {
+func TestBeforeAuthScanIsNotRepeatedAfterAuth(t *testing.T) {
 	p := newTestPlugin(t)
 	req := pluginapi.RequestInterceptRequest{
 		RequestID:      "request-cache-1",
 		SourceFormat:   "openai",
 		Model:          "upstream-model",
 		RequestedModel: "alias",
-		Body:           []byte(`{"model":"m","messages":[{"role":"user","content":"test@example.com"}]}`),
+		Body:           []byte(`{"model":"m","messages":[{"role":"user","content":"test@user.example"}]}`),
 	}
 	before, err := p.InterceptRequestBeforeAuth(context.Background(), req)
 	if err != nil {
@@ -1917,11 +1917,11 @@ func TestBeforeAndUnchangedAfterScanOnlyOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	if after.Body != nil || after.Terminate {
-		t.Fatalf("unchanged after-auth body was rescanned: terminate=%t status=%d body_len=%d", after.Terminate, after.StatusCode, len(after.Body))
+		t.Fatalf("after-auth changed the body: terminate=%t status=%d body_len=%d", after.Terminate, after.StatusCode, len(after.Body))
 	}
 	stats := p.cache.Stats()
-	if stats.Records != 1 || stats.SeenHits != 1 {
-		t.Fatalf("cache stats = %+v, want one scan and one hit", stats)
+	if stats.Records != 1 || stats.SeenHits != 0 {
+		t.Fatalf("cache stats = %+v, want one before-auth scan and no after-auth hit", stats)
 	}
 
 	if err := p.HandleRequestComplete(context.Background(), pluginapi.RequestCompletion{
@@ -1935,7 +1935,7 @@ func TestBeforeAndUnchangedAfterScanOnlyOnce(t *testing.T) {
 	}
 }
 
-func TestChangedAfterAuthBodyIsRescanned(t *testing.T) {
+func TestChangedAfterAuthBodyIsNotRescanned(t *testing.T) {
 	p := newTestPlugin(t)
 	req := pluginapi.RequestInterceptRequest{
 		RequestID:    "request-cache-2",
@@ -1947,17 +1947,17 @@ func TestChangedAfterAuthBodyIsRescanned(t *testing.T) {
 	if err != nil || before.Body != nil || before.Terminate {
 		t.Fatalf("before terminate=%t status=%d body_len=%d err=%v", before.Terminate, before.StatusCode, len(before.Body), err)
 	}
-	req.Body = []byte(`{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"user","content":"second@example.com"}]}`)
+	req.Body = []byte(`{"model":"m","messages":[{"role":"user","content":"hello"},{"role":"user","content":"second@user.example"}]}`)
 	after, err := p.InterceptRequestAfterAuth(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Body == nil || strings.Contains(string(after.Body), "second@example.com") {
-		t.Fatalf("changed after body was not sanitized: terminate=%t status=%d body_len=%d", after.Terminate, after.StatusCode, len(after.Body))
+	if after.Body != nil || after.Terminate {
+		t.Fatalf("after-auth rescanned a changed body: terminate=%t status=%d body_len=%d", after.Terminate, after.StatusCode, len(after.Body))
 	}
 	stats := p.cache.Stats()
-	if stats.Records != 2 || stats.SeenMisses < 2 {
-		t.Fatalf("cache stats = %+v", stats)
+	if stats.Records != 1 || stats.SeenMisses != 1 || stats.SeenHits != 0 || stats.Acquires != 1 {
+		t.Fatalf("cache stats = %+v, want one before-auth scan and no after-auth acquire", stats)
 	}
 }
 

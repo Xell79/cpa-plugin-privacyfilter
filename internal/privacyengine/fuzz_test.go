@@ -15,7 +15,7 @@ keywords = ["api"]
 	for _, seed := range []string{
 		"",
 		"api keyABCDEFGHIJKLMNOPQRSTUVWXYZ",
-		"prefix token=abcDEF1234567890/xyzABC4567890== suffix",
+		"prefix token=abcDEF1234567890/xyzABC4567890== suffix", // gitleaks:allow
 		string([]byte{0xff, 0xfe, 'a', 'p', 'i', ' ', 'k', 'e', 'y'}),
 	} {
 		f.Add(seed)

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sync/atomic"
 	"time"
 
@@ -8,7 +9,7 @@ import (
 )
 
 var (
-	pluginVersion  = "0.3.6"
+	pluginVersion  = "0.3.10"
 	pluginRevision = "unknown"
 )
 
@@ -72,6 +73,13 @@ func buildPluginWithRuntime(configYAML []byte, pluginDir string, runtime *runtim
 	p.engine = engine
 	p.renderer = renderer
 	p.blockRuleIDs = cfg.blockRuleSet()
+	if cfg.SubstitutionLog.Enabled {
+		subLog, errLog := newSubstitutionLogger(cfg.SubstitutionLog.effectivePath())
+		if errLog != nil {
+			return pluginapi.Plugin{}, fmt.Errorf("invalid privacyfilter config: substitution_log: %w", errLog)
+		}
+		p.subLog = subLog
+	}
 
 	return pluginapi.Plugin{
 		SchemaVersion: implementedSchemaVersion,
@@ -133,6 +141,11 @@ func buildPluginWithRuntime(configYAML []byte, pluginDir string, runtime *runtim
 					Name:        "skip_formats",
 					Type:        pluginapi.ConfigFieldTypeArray,
 					Description: "Trusted break-glass source formats to bypass inspection.",
+				},
+				{
+					Name:        "substitution_log",
+					Type:        pluginapi.ConfigFieldTypeObject,
+					Description: "Optional log of substitutions. Default: enabled false, path logs/privacyfilter-substitutions.jsonl. When enabled, appends timestamped original values to that JSONL file. Rotation is provided by the host logrotate rule.",
 				},
 			},
 		},
