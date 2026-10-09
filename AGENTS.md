@@ -21,9 +21,16 @@ Plugin Store id `privacyfilter`. That id belongs to
 `rheodev/cpa-plugin-privacyfilter` v0.2.0. Install only checksum-verified
 release artifacts.
 
-Current source version is `pluginVersion` in `main.go`. `Makefile` `VERSION`
-must stay equal to it. Release CI overrides the ldflag from `main.go`; a
-local `make build` uses the Makefile value.
+Current source version is `pluginVersion` in `main.go` (`0.3.13`). `Makefile`
+`VERSION` must stay equal to it. Release CI overrides the ldflag from
+`main.go`; a local `make build` uses the Makefile value.
+
+OpenAI chat requests may carry Anthropic `cache_control` on content blocks,
+messages, function tool definitions, tool-role messages, and tool calls, plus
+OpenRouter `annotations` and Gemini `tool_calls[].extra_content`. Those are
+opaque control or integrity data. Do not rewrite `type`, `ttl`, citation
+metadata, or thought signatures. A string sibling inside `cache_control` other
+than `type` and `ttl` must stay unsupported.
 
 ## Layout
 

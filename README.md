@@ -21,10 +21,15 @@ default. Project language is English. Agent conventions are in
 > the release-manifest validator. `v0.3.4` carries the Responses Lite/Codex
 > compatibility fix and the matching validator update. `v0.3.5` adds validated
 > OpenRouter `reasoning_details` replay compatibility and value-free rejection
-> diagnostics. Install a version only after GitHub marks its Release immutable,
-> and only from its checksum-verified artifacts. Never install a source-tree or
-> development build; verify the exact version and filenames before following the
-> examples below.
+> diagnostics. Current source version is `0.3.13`. It admits Anthropic
+> `cache_control` (`type`, `ttl`) on OpenAI chat content blocks, messages, tool
+> definitions, tool-role messages, and tool calls; OpenRouter `annotations`; and
+> Gemini `tool_calls[].extra_content` thought signatures. Those values stay
+> opaque and are not rewritten. Unknown string siblings inside `cache_control`
+> still fail closed. Install a version only after GitHub marks its Release
+> immutable, and only from its checksum-verified artifacts. Never install a
+> source-tree or development build; verify the exact version and filenames
+> before following the examples below.
 
 ## Security model
 
@@ -63,7 +68,7 @@ not retain original values for restoration.
 
 | `SourceFormat` | Request schema | Inspected data |
 |---|---|---|
-| `openai` | Chat Completions | message text, multipart text, legacy/current function arguments, tool-role output, function descriptions and parameter schemas; validated OpenRouter `reasoning`/`reasoning_content`/`reasoning_details` replay remains opaque and byte-preserved |
+| `openai` | Chat Completions | message text, multipart text, legacy/current function arguments, tool-role output, function descriptions and parameter schemas; validated OpenRouter `reasoning`/`reasoning_content`/`reasoning_details` replay, Anthropic `cache_control`, OpenRouter `annotations`, and Gemini tool-call `extra_content` remain opaque and byte-preserved |
 | `openai-response` | Responses | instructions, input/replay text, prompt variables, Responses Lite `additional_tools`, function/custom/namespace/tool-search/web-search definitions, current tool history, function descriptions and input/output schemas, text-format schemas, and encoded Codex turn metadata |
 | `claude` | Anthropic Messages | top-level system, message text, `tool_use.input`, string/structured `tool_result.content`, tool descriptions and input schemas |
 | `gemini` | Gemini GenerateContent | system/content text, function arguments/results, executable code/results, display names, function descriptions and parameter/response schemas |
@@ -74,7 +79,11 @@ Known control and integrity fields remain opaque: model/role/type discriminators
 tool names and IDs, call IDs, status values, signatures, encrypted reasoning,
 validated provider reasoning replay (`reasoning`, `reasoning_content`, and the
 `reasoning.text`/`reasoning.summary`/`reasoning.encrypted` detail union),
-binary/base64 payloads, explicitly enumerated URL/file references, and flat
+Anthropic prompt-cache markers (`cache_control.type` and `cache_control.ttl`
+on chat content blocks, messages, function tool definitions, tool-role
+messages, and tool calls), OpenRouter citation `annotations`, Gemini thought
+signatures replayed as `tool_calls[].extra_content`, binary/base64 payloads,
+explicitly enumerated URL/file references, and flat
 Codex `client_metadata` transport/session values. The encoded
 `x-codex-turn-metadata` object and additive unknown metadata are recursively
 inspected rather than causing a compatibility 422; known flat transport IDs
@@ -190,7 +199,7 @@ one canonical root library:
 
 ```bash
 sha256sum -c checksums.txt
-unzip privacyfilter_0.3.5_linux_amd64.zip
+unzip privacyfilter_0.3.13_linux_amd64.zip
 ```
 
 The archive contains exactly `privacyfilter.so` (`.dylib` on macOS, `.dll` on
@@ -388,6 +397,7 @@ publishing.
 - Original plugin and history:
   [rheodev/cpa-plugin-privacyfilter](https://github.com/rheodev/cpa-plugin-privacyfilter)
 - Hardened fork: [ahoo/cpa-plugin-privacyfilter](https://github.com/ahoo/cpa-plugin-privacyfilter)
+- Published fork: [Xell79/cpa-plugin-privacyfilter](https://github.com/Xell79/cpa-plugin-privacyfilter)
 - Protocol-safe scanner adaptations:
   [ToS0/cpa-plugin-privacyfilter](https://github.com/ToS0/cpa-plugin-privacyfilter)
 - Detector source: [PackyMe/privacy-filter](https://github.com/PackyMe/privacy-filter)
