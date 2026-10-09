@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	pluginVersion  = "0.3.10"
+	pluginVersion  = "0.3.12"
 	pluginRevision = "unknown"
 )
 

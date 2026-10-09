@@ -1,5 +1,5 @@
 PLUGIN_NAME ?= privacyfilter
-VERSION ?= 0.3.10
+VERSION ?= 0.3.12
 GOOS ?= $(shell go env GOOS)
 GOARCH ?= $(shell go env GOARCH)
 BUILD_ROOT ?= dist/staging

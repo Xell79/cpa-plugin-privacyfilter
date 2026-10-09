@@ -53,7 +53,7 @@ func walkOpenAIToolDefinitions(c *collector, root *node) error {
 				c.unsupported(tool, "tool definition is not an object")
 				continue
 			}
-			if err = c.unique(tool, "type", "function"); err != nil {
+			if err = c.unique(tool, "type", "function", "cache_control"); err != nil {
 				return err
 			}
 			typeNode, _, fieldErr := c.stringField(tool, "type", true)
@@ -72,6 +72,9 @@ func walkOpenAIToolDefinitions(c *collector, root *node) error {
 				return fieldErr
 			}
 			if err = walkOpenAIFunctionDefinition(c, function); err != nil {
+				return err
+			}
+			if err = walkAnthropicCacheControl(c, tool); err != nil {
 				return err
 			}
 		}
@@ -144,11 +147,26 @@ func walkOpenAIMessage(c *collector, message *node) error {
 		message,
 		"role", "content", "tool_calls", "function_call", "name", "id", "call_id", "tool_call_id",
 		"refusal", "audio", "reasoning", "reasoning_content", "reasoning_details",
+		"cache_control", "annotations",
 	); err != nil {
 		return err
 	}
 	for _, key := range []string{"name", "id", "call_id", "tool_call_id"} {
 		if err := c.markOpaqueStringField(message, key, false, true); err != nil {
+			return err
+		}
+	}
+	if err := walkAnthropicCacheControl(c, message); err != nil {
+		return err
+	}
+	// OpenRouter replay metadata. Citation URLs and titles are integrity-coupled
+	// to the assistant text, so the whole array is opaque rather than rewritten.
+	annotations, hasAnnotations, err := c.field(message, "annotations")
+	if err != nil {
+		return err
+	}
+	if hasAnnotations {
+		if err = c.markOpaque(annotations); err != nil {
 			return err
 		}
 	}
@@ -333,11 +351,22 @@ func walkOpenAIToolCall(c *collector, call *node) error {
 	if call.kind != payload.KindObject {
 		return c.shape(call, "object", "tool_calls element")
 	}
-	if err := c.unique(call, "type", "function", "id", "name", "call_id"); err != nil {
+	if err := c.unique(call, "type", "function", "id", "name", "call_id", "extra_content"); err != nil {
 		return err
 	}
 	for _, key := range []string{"id", "name", "call_id"} {
 		if err := c.markOpaqueStringField(call, key, false, true); err != nil {
+			return err
+		}
+	}
+	// Gemini thought signatures replayed through an OpenAI-compatible proxy.
+	// The signature is integrity-coupled to the tool call and must not be rewritten.
+	extra, hasExtra, err := c.field(call, "extra_content")
+	if err != nil {
+		return err
+	}
+	if hasExtra {
+		if err = c.markOpaque(extra); err != nil {
 			return err
 		}
 	}

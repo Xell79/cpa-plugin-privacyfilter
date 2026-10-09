@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-	"strings"
 
 	"github.com/ahoo/cpa-plugin-privacyfilter/payload"
 )
@@ -569,30 +568,6 @@ func (c *collector) walkStringObjectField(object *node, key string, required, nu
 	return c.walkStringValues(value, scope, TargetKindJSONValue)
 }
 
-func (c *collector) markOpaqueObjectField(object *node, key string, required, nullable bool) error {
-	value, present, err := c.field(object, key)
-	if err != nil {
-		return err
-	}
-	if !present {
-		if required {
-			return c.missing(object, key, "object")
-		}
-		return nil
-	}
-	if value.kind == payload.KindNull && nullable {
-		return nil
-	}
-	if value.kind != payload.KindObject {
-		expected := "object"
-		if nullable {
-			expected += " or null"
-		}
-		return c.shape(value, expected, key)
-	}
-	return c.markOpaque(value)
-}
-
 func (c *collector) markOpaqueStringArrayField(object *node, key string, required, nullable bool) error {
 	value, present, err := c.field(object, key)
 	if err != nil {
@@ -772,7 +747,7 @@ func (c *collector) walkTypedTextBlock(block *node, scope Scope) error {
 		c.unsupported(block, "content array element is not an object")
 		return nil
 	}
-	if err := c.unique(block, "type", "text", "refusal", "id", "name", "call_id", "signature", "prompt_cache_breakpoint"); err != nil {
+	if err := c.unique(block, "type", "text", "refusal", "id", "name", "call_id", "signature", "prompt_cache_breakpoint", "cache_control"); err != nil {
 		return err
 	}
 	for _, key := range []string{"id", "name", "call_id", "signature"} {
@@ -781,6 +756,9 @@ func (c *collector) walkTypedTextBlock(block *node, scope Scope) error {
 		}
 	}
 	if err := walkCommonCacheBreakpoint(c, block); err != nil {
+		return err
+	}
+	if err := walkAnthropicCacheControl(c, block); err != nil {
 		return err
 	}
 	typeNode, ok, err := c.stringField(block, "type", false)
@@ -867,16 +845,31 @@ func walkCommonCacheBreakpoint(c *collector, block *node) error {
 	return c.markOpaqueStringField(breakpoint, "mode", true, false)
 }
 
+// walkAnthropicCacheControl admits the Anthropic prompt-cache marker that
+// OpenAI-compatible clients (Kilo via @ai-sdk/anthropic and OpenRouter) attach
+// to chat content blocks, messages, and tool definitions. type and ttl are
+// control tokens and must not be rewritten. Unknown string siblings stay
+// undisposed so ensureStringDisposition still rejects them.
+func walkAnthropicCacheControl(c *collector, object *node) error {
+	cacheControl, present, err := c.field(object, "cache_control")
+	if err != nil || !present || cacheControl.kind == payload.KindNull {
+		return err
+	}
+	if cacheControl.kind != payload.KindObject {
+		return c.shape(cacheControl, "object or null", "cache_control")
+	}
+	if err = c.unique(cacheControl, "type", "ttl"); err != nil {
+		return err
+	}
+	if err = c.markOpaqueStringField(cacheControl, "type", true, false); err != nil {
+		return err
+	}
+	return c.markOpaqueStringField(cacheControl, "ttl", false, true)
+}
+
 func (c *collector) validateRootControls(root *node) error {
 	if err := c.unique(root, "model"); err != nil {
 		return err
 	}
 	return c.markOpaqueStringField(root, "model", false, true)
-}
-
-func lowerType(value *node) string {
-	if value == nil || value.token == nil {
-		return ""
-	}
-	return strings.ToLower(value.token.Value)
 }

@@ -406,6 +406,31 @@ func TestCommonMediaAndCacheControlsUseExactDisposition(t *testing.T) {
 			`{"messages":[{"role":"user","content":[{"type":"text","text":"ok","prompt_cache_breakpoint":{"mode":"default","future":"extension"}}]}]}`,
 			1,
 		},
+		{
+			"anthropic cache control on chat content",
+			`{"messages":[{"role":"user","content":[{"type":"text","text":"user secret","cache_control":{"type":"ephemeral","ttl":"5m"}}]}]}`,
+			0,
+		},
+		{
+			"anthropic cache control string extension",
+			`{"messages":[{"role":"user","content":[{"type":"text","text":"ok","cache_control":{"type":"ephemeral","future":"extension"}}]}]}`,
+			1,
+		},
+		{
+			"message cache control and annotations",
+			`{"messages":[{"role":"assistant","content":"assistant secret","cache_control":{"type":"ephemeral"},"annotations":[{"type":"url_citation","url":"https://example.invalid"}]}]}`,
+			0,
+		},
+		{
+			"tool call extra_content signature",
+			`{"messages":[{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"},"extra_content":{"google":{"thought_signature":"sig"}}}]}]}`,
+			0,
+		},
+		{
+			"tool message cache control",
+			`{"messages":[{"role":"tool","name":"lookup","tool_call_id":"call_1","content":"tool secret","cache_control":{"type":"ephemeral"}}]}`,
+			0,
+		},
 	}
 	for _, testCase := range tests {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -413,7 +438,7 @@ func TestCommonMediaAndCacheControlsUseExactDisposition(t *testing.T) {
 			if result.UnsupportedCount != testCase.wantUnsupported {
 				t.Fatalf("unsupported count = %d, want %d", result.UnsupportedCount, testCase.wantUnsupported)
 			}
-			assertValuesNotTargeted(t, result, "https://example.invalid", "auto", "default", "extension")
+			assertValuesNotTargeted(t, result, "https://example.invalid", "auto", "default", "extension", "ephemeral", "5m", "sig")
 		})
 	}
 }
