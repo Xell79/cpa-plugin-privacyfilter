@@ -351,7 +351,7 @@ func walkOpenAIToolCall(c *collector, call *node) error {
 	if call.kind != payload.KindObject {
 		return c.shape(call, "object", "tool_calls element")
 	}
-	if err := c.unique(call, "type", "function", "id", "name", "call_id", "extra_content"); err != nil {
+	if err := c.unique(call, "type", "function", "id", "name", "call_id", "extra_content", "cache_control"); err != nil {
 		return err
 	}
 	for _, key := range []string{"id", "name", "call_id"} {
@@ -369,6 +369,9 @@ func walkOpenAIToolCall(c *collector, call *node) error {
 		if err = c.markOpaque(extra); err != nil {
 			return err
 		}
+	}
+	if err = walkAnthropicCacheControl(c, call); err != nil {
+		return err
 	}
 	callType, hasType, err := c.stringField(call, "type", false)
 	if err != nil {

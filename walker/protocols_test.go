@@ -427,6 +427,11 @@ func TestCommonMediaAndCacheControlsUseExactDisposition(t *testing.T) {
 			0,
 		},
 		{
+			"tool call cache control",
+			`{"messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}],"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{}"},"cache_control":{"type":"ephemeral"}}]}]}`,
+			0,
+		},
+		{
 			"tool message cache control",
 			`{"messages":[{"role":"tool","name":"lookup","tool_call_id":"call_1","content":"tool secret","cache_control":{"type":"ephemeral"}}]}`,
 			0,
